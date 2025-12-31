@@ -28,9 +28,9 @@ import android.util.Log;
 import android.view.MenuItem;
 import android.view.MotionEvent;
 import android.view.View;
+import android.widget.Button;
 import android.widget.ImageButton;
 import android.widget.PopupMenu;
-import android.widget.TextView;
 import android.widget.Toast;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
@@ -82,8 +82,13 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 /**
  * This is a simple example that shows how to create an augmented reality (AR) application using the
@@ -129,8 +134,12 @@ public class HelloArActivity extends AppCompatActivity implements SampleRender.R
   private TapHelper tapHelper;
   private SampleRender render;
 
-  private TextView measurementMessage;
   private MeasurementOverlayView measurementOverlayView;
+
+  private final List<MeasurementRecord> measurementRecords = new ArrayList<>();
+  private int nextAnchorId = 1;
+  private int nextMeasurementId = 1;
+  private final Object anchorLock = new Object();
 
   private PlaneRenderer planeRenderer;
   private BackgroundRenderer backgroundRenderer;
@@ -187,10 +196,99 @@ public class HelloArActivity extends AppCompatActivity implements SampleRender.R
     super.onCreate(savedInstanceState);
     setContentView(R.layout.activity_main);
     surfaceView = findViewById(R.id.surfaceview);
-    measurementMessage = findViewById(R.id.measurement_message);
     measurementOverlayView = findViewById(R.id.measurement_overlay_view);
-    if (measurementMessage != null) {
-      measurementMessage.setText(R.string.measurement_initial);
+    if (measurementOverlayView != null) {
+      measurementOverlayView.setOnAnchorDeleteListener(
+          anchorId -> {
+            if (surfaceView != null) {
+              surfaceView.queueEvent(() -> removeAnchorById(anchorId));
+            } else {
+              removeAnchorById(anchorId);
+            }
+          });
+      measurementOverlayView.setOnPassthroughTouchListener(
+          event -> {
+            if (surfaceView != null) {
+              surfaceView.dispatchTouchEvent(event);
+            }
+          });
+      measurementOverlayView.setOnMeasurementInteractionListener(
+          new MeasurementOverlayView.OnMeasurementInteractionListener() {
+            @Override
+            public float requestDistanceMeters(int startAnchorId, int endAnchorId) {
+              synchronized (anchorLock) {
+                Anchor start = getAnchorById(startAnchorId);
+                Anchor end = getAnchorById(endAnchorId);
+                return calculateDistanceBetweenAnchors(start, end);
+              }
+            }
+
+            @Override
+            public void onMeasurementCreated(int startAnchorId, int endAnchorId) {
+              if (startAnchorId == endAnchorId) {
+                return;
+              }
+              Runnable task =
+                  () -> {
+                    synchronized (anchorLock) {
+                      Anchor start = getAnchorById(startAnchorId);
+                      Anchor end = getAnchorById(endAnchorId);
+                      if (start == null || end == null) {
+                        return;
+                      }
+                      int measurementId = nextMeasurementId++;
+                      measurementRecords.add(
+                          new MeasurementRecord(measurementId, startAnchorId, endAnchorId));
+                    }
+                  };
+              task.run();
+            }
+
+            @Override
+            public void onMeasurementDeleted(int measurementId) {
+              Runnable task =
+                  () -> {
+                    synchronized (anchorLock) {
+                      measurementRecords.removeIf(record -> record.id == measurementId);
+                    }
+                  };
+              if (surfaceView != null) {
+                surfaceView.queueEvent(task);
+              } else {
+                task.run();
+              }
+            }
+          });
+    }
+    Button resetButton = findViewById(R.id.reset_button);
+    if (resetButton != null) {
+      resetButton.setOnClickListener(
+          v -> {
+            Runnable task =
+                () -> {
+                  synchronized (anchorLock) {
+                    for (WrappedAnchor wrappedAnchor : wrappedAnchors) {
+                      wrappedAnchor.getAnchor().detach();
+                    }
+                    wrappedAnchors.clear();
+                    measurementRecords.clear();
+                    nextAnchorId = 1;
+                    nextMeasurementId = 1;
+                  }
+                  runOnUiThread(
+                      () -> {
+                        if (measurementOverlayView != null) {
+                          measurementOverlayView.clear();
+                        }
+                      });
+                  resetArSession();
+                };
+            if (surfaceView != null) {
+              surfaceView.queueEvent(task);
+            } else {
+              task.run();
+            }
+          });
     }
     displayRotationHelper = new DisplayRotationHelper(/* context= */ this);
 
@@ -663,15 +761,26 @@ public class HelloArActivity extends AppCompatActivity implements SampleRender.R
           // Cap the number of objects created. This avoids overloading both the
           // rendering system and ARCore.
           if (wrappedAnchors.size() >= 20) {
-            wrappedAnchors.get(0).getAnchor().detach();
-            wrappedAnchors.remove(0);
+            WrappedAnchor toRemove;
+            synchronized (anchorLock) {
+              if (wrappedAnchors.isEmpty()) {
+                break;
+              }
+              toRemove = wrappedAnchors.get(0);
+            }
+            if (toRemove != null) {
+              removeAnchorById(toRemove.getId());
+            }
           }
 
           // Adding an Anchor tells ARCore that it should track this position in
           // space. This anchor is created on the Plane to place the 3D model
           // in the correct position relative both to the world and to the plane.
           Anchor newAnchor = hit.createAnchor();
-          wrappedAnchors.add(new WrappedAnchor(newAnchor, trackable));
+          int anchorId = nextAnchorId++;
+          synchronized (anchorLock) {
+            wrappedAnchors.add(new WrappedAnchor(anchorId, newAnchor, trackable));
+          }
           // For devices that support the Depth API, shows a dialog to suggest enabling
           // depth-based occlusion. This dialog needs to be spawned on the UI thread.
           this.runOnUiThread(this::showOcclusionDialogIfNeeded);
@@ -880,23 +989,27 @@ public class HelloArActivity extends AppCompatActivity implements SampleRender.R
   }
 
   private void updateMeasurementUi(float[] viewMatrix, float[] projectionMatrix) {
-    if (measurementMessage == null || measurementOverlayView == null) {
+    if (measurementOverlayView == null) {
       return;
     }
 
     List<Anchor> trackingAnchors = new ArrayList<>();
-    for (WrappedAnchor wrappedAnchor : wrappedAnchors) {
-      Anchor anchor = wrappedAnchor.getAnchor();
-      if (anchor.getTrackingState() == TrackingState.TRACKING) {
-        trackingAnchors.add(anchor);
+    List<Integer> trackingAnchorIds = new ArrayList<>();
+    synchronized (anchorLock) {
+      for (WrappedAnchor wrappedAnchor : wrappedAnchors) {
+        Anchor anchor = wrappedAnchor.getAnchor();
+        if (anchor.getTrackingState() == TrackingState.TRACKING) {
+          trackingAnchors.add(anchor);
+          trackingAnchorIds.add(wrappedAnchor.getId());
+        }
       }
     }
 
-    if (trackingAnchors.size() < 2) {
+    if (trackingAnchors.isEmpty()) {
       runOnUiThread(
           () -> {
-            measurementMessage.setText(R.string.measurement_initial);
-            measurementOverlayView.clear();
+            measurementOverlayView.setAnchors(Collections.emptyList(), Collections.emptyList());
+            measurementOverlayView.setMeasurementLines(Collections.emptyList());
           });
       return;
     }
@@ -917,7 +1030,8 @@ public class HelloArActivity extends AppCompatActivity implements SampleRender.R
     List<PointF> screenPoints = new ArrayList<>();
     boolean projectionFailed = false;
     for (Anchor anchor : trackingAnchors) {
-      PointF point = worldToScreen(anchor.getPose().getTranslation(), viewProjectionMatrix, width, height);
+      PointF point =
+          worldToScreen(anchor.getPose().getTranslation(), viewProjectionMatrix, width, height);
       if (point == null) {
         projectionFailed = true;
         break;
@@ -929,33 +1043,47 @@ public class HelloArActivity extends AppCompatActivity implements SampleRender.R
       return;
     }
 
-    List<Float> segmentDistances = new ArrayList<>();
-    float totalDistance = 0f;
-    for (int i = 1; i < trackingAnchors.size(); ++i) {
-      float distance = calculateDistanceBetweenAnchors(trackingAnchors.get(i - 1), trackingAnchors.get(i));
-      if (Float.isNaN(distance)) {
-        projectionFailed = true;
-        break;
-      }
-      segmentDistances.add(distance);
-      totalDistance += distance;
-    }
-
-    if (projectionFailed || segmentDistances.isEmpty()) {
-      return;
-    }
-
-    float lastSegment = segmentDistances.get(segmentDistances.size() - 1);
-    final String summaryText =
-        getString(R.string.measurement_summary, trackingAnchors.size(), lastSegment, totalDistance);
     final List<PointF> overlayPoints = new ArrayList<>(screenPoints);
-    final List<Float> overlaySegments = new ArrayList<>(segmentDistances);
+    final List<Integer> overlayAnchorIds = new ArrayList<>(trackingAnchorIds);
+    final Set<Integer> trackingAnchorIdSet = new HashSet<>(trackingAnchorIds);
+    final Map<Integer, Anchor> overlayAnchorMap = new HashMap<>();
+    for (int i = 0; i < trackingAnchors.size(); ++i) {
+      overlayAnchorMap.put(trackingAnchorIds.get(i), trackingAnchors.get(i));
+    }
+    final List<MeasurementOverlayView.MeasurementLine> overlayLines =
+        buildMeasurementLines(trackingAnchorIdSet, overlayAnchorMap);
 
     runOnUiThread(
         () -> {
-          measurementMessage.setText(summaryText);
-          measurementOverlayView.setAnchors(overlayPoints, overlaySegments);
+          measurementOverlayView.setAnchors(overlayPoints, overlayAnchorIds);
+          measurementOverlayView.setMeasurementLines(overlayLines);
         });
+  }
+
+  private List<MeasurementOverlayView.MeasurementLine> buildMeasurementLines(
+      Set<Integer> trackingAnchorIds, Map<Integer, Anchor> anchorMap) {
+    List<MeasurementOverlayView.MeasurementLine> lines = new ArrayList<>();
+    synchronized (anchorLock) {
+      for (MeasurementRecord record : measurementRecords) {
+        if (!trackingAnchorIds.contains(record.startAnchorId)
+            || !trackingAnchorIds.contains(record.endAnchorId)) {
+          continue;
+        }
+        Anchor start = anchorMap.get(record.startAnchorId);
+        Anchor end = anchorMap.get(record.endAnchorId);
+        if (start == null || end == null) {
+          continue;
+        }
+        float distance = calculateDistanceBetweenAnchors(start, end);
+        if (Float.isNaN(distance)) {
+          continue;
+        }
+        lines.add(
+            new MeasurementOverlayView.MeasurementLine(
+                record.id, record.startAnchorId, record.endAnchorId, distance));
+      }
+    }
+    return lines;
   }
 
   private PointF worldToScreen(float[] worldPosition, float[] viewProjectionMatrix, int width, int height) {
@@ -978,6 +1106,95 @@ public class HelloArActivity extends AppCompatActivity implements SampleRender.R
     float screenY = (0.5f - ndcY * 0.5f) * height;
     return new PointF(screenX, screenY);
   }
+  private Anchor getAnchorById(int anchorId) {
+    synchronized (anchorLock) {
+      return getAnchorByIdLocked(anchorId);
+    }
+  }
+
+  private Anchor getAnchorByIdLocked(int anchorId) {
+    for (WrappedAnchor wrappedAnchor : wrappedAnchors) {
+      if (wrappedAnchor.getId() == anchorId) {
+        return wrappedAnchor.getAnchor();
+      }
+    }
+    return null;
+  }
+
+  private void removeAnchorById(int anchorId) {
+    WrappedAnchor toDetach = null;
+    synchronized (anchorLock) {
+      Iterator<WrappedAnchor> iterator = wrappedAnchors.iterator();
+      while (iterator.hasNext()) {
+        WrappedAnchor candidate = iterator.next();
+        if (candidate.getId() == anchorId) {
+          toDetach = candidate;
+          iterator.remove();
+          break;
+        }
+      }
+      if (toDetach != null) {
+        measurementRecords.removeIf(record -> record.containsAnchor(anchorId));
+      }
+    }
+    if (toDetach != null) {
+      toDetach.getAnchor().detach();
+    }
+  }
+
+  private void resetArSession() {
+    runOnUiThread(
+        () -> {
+          Session previousSession = session;
+          if (previousSession == null) {
+            return;
+          }
+          try {
+            session = null;
+            previousSession.pause();
+            previousSession.close();
+
+            Session newSession = new Session(/* context= */ this);
+            session = newSession;
+            configureSession();
+            session.resume();
+            hasSetTextureNames = false;
+          } catch (UnavailableArcoreNotInstalledException
+              | UnavailableApkTooOldException
+              | UnavailableSdkTooOldException
+              | UnavailableDeviceNotCompatibleException e) {
+            Log.e(TAG, "Failed to reset AR session", e);
+            messageSnackbarHelper.showError(this, "Unable to reset AR session: " + e.getMessage());
+          } catch (CameraNotAvailableException e) {
+            Log.e(TAG, "Camera not available during reset", e);
+            messageSnackbarHelper.showError(this, "Camera not available. Try restarting the app.");
+          } catch (Exception e) {
+            Log.e(TAG, "Unexpected error resetting AR session", e);
+            messageSnackbarHelper.showError(this, "Failed to reset AR session");
+          }
+        });
+  }
+
+  private static class MeasurementRecord {
+    final int id;
+    final int startAnchorId;
+    final int endAnchorId;
+
+    MeasurementRecord(int id, int startAnchorId, int endAnchorId) {
+      this.id = id;
+      this.startAnchorId = startAnchorId;
+      this.endAnchorId = endAnchorId;
+    }
+
+    boolean matches(int firstAnchorId, int secondAnchorId) {
+      return (startAnchorId == firstAnchorId && endAnchorId == secondAnchorId)
+          || (startAnchorId == secondAnchorId && endAnchorId == firstAnchorId);
+    }
+
+    boolean containsAnchor(int anchorId) {
+      return startAnchorId == anchorId || endAnchorId == anchorId;
+    }
+  }
 }
 
 /**
@@ -985,12 +1202,18 @@ public class HelloArActivity extends AppCompatActivity implements SampleRender.R
  * whether or not an Anchor originally was attached to an {@link InstantPlacementPoint}.
  */
 class WrappedAnchor {
-  private Anchor anchor;
-  private Trackable trackable;
+  private final int id;
+  private final Anchor anchor;
+  private final Trackable trackable;
 
-  public WrappedAnchor(Anchor anchor, Trackable trackable) {
+  public WrappedAnchor(int id, Anchor anchor, Trackable trackable) {
+    this.id = id;
     this.anchor = anchor;
     this.trackable = trackable;
+  }
+
+  public int getId() {
+    return id;
   }
 
   public Anchor getAnchor() {

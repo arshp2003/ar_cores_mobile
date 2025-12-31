@@ -32,5 +32,6 @@
   </string-array>
   <string translatable="false" name="measurement_initial">Place at least two anchors.</string>
   <string name="measurement_summary">Anchors: %1$d | Last: %2$.2f m | Total: %3$.2f m</string>
+  <string name="reset_button_label">Reset</string>
 
 </resources>
