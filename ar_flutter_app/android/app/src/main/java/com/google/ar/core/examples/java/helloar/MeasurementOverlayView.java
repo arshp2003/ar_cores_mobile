@@ -24,7 +24,8 @@ import java.util.Set;
  */
 public class MeasurementOverlayView extends View {
 
-  private static final float DEFAULT_ANCHOR_RADIUS = 30f;
+  private static final float DEFAULT_ANCHOR_RADIUS = 50f;
+  private static final String ANCHOR_EMOJI = "\uD83D\uDCCD";
   private static final float ANCHOR_DELETE_RADIUS = 18f;
   private static final float ANCHOR_DELETE_TOUCH_EXTRA = 12f;
   private static final float MIN_SCALE = 0.5f;
@@ -40,7 +41,6 @@ public class MeasurementOverlayView extends View {
   private static final Locale LABEL_LOCALE = Locale.US;
 
   private final Paint anchorPaint = new Paint();
-  private final Paint anchorStrokePaint = new Paint();
   private final Paint deletePaint = new Paint();
   private final Paint deleteLinePaint = new Paint();
   private final Paint linePaint = new Paint();
@@ -86,13 +86,8 @@ public class MeasurementOverlayView extends View {
     setWillNotDraw(false);
 
     anchorPaint.setAntiAlias(true);
-    anchorPaint.setStyle(Paint.Style.FILL);
-    anchorPaint.setColor(0xFFFFC107);
-
-    anchorStrokePaint.setAntiAlias(true);
-    anchorStrokePaint.setStyle(Paint.Style.STROKE);
-    anchorStrokePaint.setStrokeWidth(4f);
-    anchorStrokePaint.setColor(0xFFFFFFFF);
+    anchorPaint.setTextAlign(Paint.Align.CENTER);
+    anchorPaint.setTextSize(DEFAULT_ANCHOR_RADIUS * 2f);
 
     deletePaint.setAntiAlias(true);
     deletePaint.setStyle(Paint.Style.FILL);
@@ -420,8 +415,11 @@ public class MeasurementOverlayView extends View {
       float scale = anchorScales.getOrDefault(anchorId, 1.0f);
       float radius = DEFAULT_ANCHOR_RADIUS * scale;
 
-      canvas.drawCircle(point.x, point.y, radius, anchorPaint);
-      canvas.drawCircle(point.x, point.y, radius, anchorStrokePaint);
+      Paint.FontMetrics metrics = anchorPaint.getFontMetrics();
+      float textBaseline = point.y - (metrics.ascent + metrics.descent) / 2f;
+      float textSize = DEFAULT_ANCHOR_RADIUS * 2f * scale;
+      anchorPaint.setTextSize(textSize);
+      canvas.drawText(ANCHOR_EMOJI, point.x, textBaseline, anchorPaint);
 
       float deleteX = point.x + radius * 0.7f;
       float deleteY = point.y - radius * 0.7f;
