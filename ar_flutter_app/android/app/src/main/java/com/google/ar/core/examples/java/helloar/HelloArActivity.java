@@ -16,24 +16,37 @@
 
 package com.google.ar.core.examples.java.helloar;
 
+import android.content.Context;
 import android.content.DialogInterface;
+import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.res.Resources;
 import android.graphics.PointF;
 import android.media.Image;
+import android.net.Uri;
 import android.opengl.GLES30;
 import android.opengl.GLSurfaceView;
 import android.opengl.Matrix;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.os.SystemClock;
 import android.util.Log;
+import android.util.JsonWriter;
 import android.view.MenuItem;
 import android.view.MotionEvent;
 import android.view.View;
 import android.widget.Button;
 import android.widget.ImageButton;
 import android.widget.PopupMenu;
+import android.widget.TextView;
 import android.widget.Toast;
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.documentfile.provider.DocumentFile;
+import android.text.TextUtils;
 import com.google.ar.core.Anchor;
 import com.google.ar.core.ArCoreApk;
 import com.google.ar.core.ArCoreApk.Availability;
@@ -53,6 +66,8 @@ import com.google.ar.core.Session;
 import com.google.ar.core.Trackable;
 import com.google.ar.core.TrackingFailureReason;
 import com.google.ar.core.TrackingState;
+import com.google.ar.core.RecordingConfig;
+import com.google.ar.core.Pose;
 import com.google.ar.core.examples.java.common.helpers.CameraPermissionHelper;
 import com.google.ar.core.examples.java.common.helpers.DepthSettings;
 import com.google.ar.core.examples.java.common.helpers.DisplayRotationHelper;
@@ -73,22 +88,37 @@ import com.google.ar.core.examples.java.common.samplerender.arcore.PlaneRenderer
 import com.google.ar.core.examples.java.common.samplerender.arcore.SpecularCubemapFilter;
 import com.google.ar.core.exceptions.CameraNotAvailableException;
 import com.google.ar.core.exceptions.NotYetAvailableException;
+import com.google.ar.core.exceptions.RecordingFailedException;
 import com.google.ar.core.exceptions.UnavailableApkTooOldException;
 import com.google.ar.core.exceptions.UnavailableArcoreNotInstalledException;
 import com.google.ar.core.exceptions.UnavailableDeviceNotCompatibleException;
 import com.google.ar.core.exceptions.UnavailableSdkTooOldException;
 import com.google.ar.core.exceptions.UnavailableUserDeclinedInstallationException;
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
+import java.io.OutputStreamWriter;
+import java.io.BufferedOutputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.Date;
+import java.text.SimpleDateFormat;
+import java.util.Locale;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
 
 /**
  * This is a simple example that shows how to create an augmented reality (AR) application using the
@@ -101,6 +131,15 @@ public class HelloArActivity extends AppCompatActivity implements SampleRender.R
 
   private static final String SEARCHING_PLANE_MESSAGE = "Searching for surfaces...";
   private static final String WAITING_FOR_TAP_MESSAGE = "Tap on a surface to place an object.";
+
+  private static final String PREFS_NAME = "hello_ar_prefs";
+  private static final String PREF_RECORDING_DIR = "recording_output_dir";
+  private static final String PREF_RECORDING_TREE_URI = "recording_output_tree_uri";
+  private static final String RECORDING_TIMESTAMP_PATTERN = "yyyyMMdd_HHmmss";
+  private static final String RECORDING_FILE_EXTENSION = ".mp4";
+  private static final String DEFAULT_RECORDING_SUBDIR = "ar_recordings";
+  private static final String RECORDING_MIME_TYPE = "video/mp4";
+  private static final long RECORDING_TIMER_UPDATE_INTERVAL_MS = 1000L;
 
   // See the definition of updateSphericalHarmonicsCoefficients for an explanation of these
   // constants.
@@ -133,6 +172,39 @@ public class HelloArActivity extends AppCompatActivity implements SampleRender.R
   private final TrackingStateHelper trackingStateHelper = new TrackingStateHelper(this);
   private TapHelper tapHelper;
   private SampleRender render;
+
+  private SharedPreferences sharedPreferences;
+  private ImageButton recordButton;
+  private View recordingStatusContainer;
+  private View recordingStatusIndicator;
+  private TextView recordingTimerText;
+  private Handler recordingTimerHandler;
+  private long recordingStartElapsedRealtime = 0L;
+  private final Runnable recordingTimerRunnable =
+      new Runnable() {
+        @Override
+        public void run() {
+          if (!isRecording) {
+            return;
+          }
+          updateRecordingTimerUi();
+          if (recordingTimerHandler != null) {
+            recordingTimerHandler.postDelayed(this, RECORDING_TIMER_UPDATE_INTERVAL_MS);
+          }
+        }
+      };
+
+  private ActivityResultLauncher<Uri> directoryPickerLauncher;
+  private boolean isRecording = false;
+  private String currentRecordingPath = null;
+  private Uri currentRecordingContentUri = null;
+  private String currentRecordingDisplayLabel = null;
+  private boolean recordingDotVisible = true;
+  private String currentRecordingJsonPath = null;
+  private Uri currentRecordingJsonUri = null;
+  private RecordingDestination currentRecordingDestination = null;
+  private RecordingDataWriter recordingDataWriter = null;
+  private long recordingFrameIndex = 0L;
 
   private MeasurementOverlayView measurementOverlayView;
 
@@ -197,6 +269,55 @@ public class HelloArActivity extends AppCompatActivity implements SampleRender.R
     setContentView(R.layout.activity_main);
     surfaceView = findViewById(R.id.surfaceview);
     measurementOverlayView = findViewById(R.id.measurement_overlay_view);
+
+    sharedPreferences = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+
+    recordButton = findViewById(R.id.record_button);
+    recordingStatusContainer = findViewById(R.id.recording_status_container);
+    recordingStatusIndicator = findViewById(R.id.recording_status_indicator);
+    recordingTimerText = findViewById(R.id.recording_timer_text);
+    recordingTimerHandler = new Handler(Looper.getMainLooper());
+    if (recordButton != null) {
+      recordButton.setOnClickListener(v -> onRecordButtonClicked());
+    }
+    updateRecordingUiState();
+
+    directoryPickerLauncher =
+        registerForActivityResult(
+            new ActivityResultContracts.OpenDocumentTree(),
+            uri -> {
+              if (uri == null) {
+                Toast.makeText(
+                        HelloArActivity.this,
+                        R.string.recording_directory_picker_unavailable,
+                        Toast.LENGTH_SHORT)
+                    .show();
+                return;
+              }
+              try {
+                final int takeFlags =
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION;
+                getContentResolver().takePersistableUriPermission(uri, takeFlags);
+                sharedPreferences
+                    .edit()
+                    .putString(PREF_RECORDING_TREE_URI, uri.toString())
+                    .remove(PREF_RECORDING_DIR)
+                    .apply();
+                Toast.makeText(
+                        HelloArActivity.this,
+                        R.string.recording_output_saved_uri,
+                        Toast.LENGTH_SHORT)
+                    .show();
+              } catch (SecurityException e) {
+                Log.e(TAG, "Failed to take persistable uri permission", e);
+                Toast.makeText(
+                        HelloArActivity.this,
+                        R.string.recording_no_directory_error,
+                        Toast.LENGTH_SHORT)
+                    .show();
+              }
+            });
+
     if (measurementOverlayView != null) {
       measurementOverlayView.setOnAnchorDeleteListener(
           anchorId -> {
@@ -324,6 +445,13 @@ public class HelloArActivity extends AppCompatActivity implements SampleRender.R
     } else if (item.getItemId() == R.id.instant_placement_settings) {
       launchInstantPlacementSettingsMenuDialog();
       return true;
+    } else if (item.getItemId() == R.id.recording_output_settings) {
+      if (isRecording) {
+        Toast.makeText(this, R.string.recording_in_progress_warning, Toast.LENGTH_SHORT).show();
+      } else {
+        showRecordingOutputDialog();
+      }
+      return true;
     }
     return false;
   }
@@ -422,6 +550,9 @@ public class HelloArActivity extends AppCompatActivity implements SampleRender.R
   public void onPause() {
     super.onPause();
     if (session != null) {
+      if (isRecording) {
+        stopRecordingInternal();
+      }
       // Note that the order matters - GLSurfaceView is paused first so that it does not try
       // to query the session. If Session is paused before GLSurfaceView, GLSurfaceView may
       // still call session.update() and get a SessionPausedException.
@@ -723,7 +854,573 @@ public class HelloArActivity extends AppCompatActivity implements SampleRender.R
     // Compose the virtual scene with the background.
     backgroundRenderer.drawVirtualScene(render, virtualSceneFramebuffer, Z_NEAR, Z_FAR);
 
+    recordFrameData(frame);
     updateMeasurementUi(viewMatrix, projectionMatrix);
+  }
+
+  private void onRecordButtonClicked() {
+    if (session == null) {
+      Toast.makeText(this, R.string.recording_output_invalid_path, Toast.LENGTH_SHORT).show();
+      return;
+    }
+    if (!isRecording) {
+      startRecordingInternal();
+    } else {
+      stopRecordingInternal();
+    }
+  }
+
+  private void startRecordingInternal() {
+    if (isRecording || session == null) {
+      return;
+    }
+
+    RecordingDestination destination = createRecordingDestination();
+    if (destination == null) {
+      return;
+    }
+
+    RecordingConfig recordingConfig = new RecordingConfig(session).setAutoStopOnPause(true);
+    if (destination.getVideoFilePath() != null) {
+      recordingConfig.setMp4DatasetFilePath(destination.getVideoFilePath());
+    } else if (destination.getVideoUri() != null) {
+      recordingConfig.setMp4DatasetUri(destination.getVideoUri());
+    } else {
+      Toast.makeText(this, R.string.recording_prepare_failed, Toast.LENGTH_SHORT).show();
+      destination.deleteArtifacts(this);
+      return;
+    }
+
+    try {
+      session.startRecording(recordingConfig);
+    } catch (RecordingFailedException e) {
+      Log.e(TAG, "Failed to start ARCore recording", e);
+      Toast.makeText(this, e.getMessage(), Toast.LENGTH_SHORT).show();
+      destination.deleteArtifacts(this);
+      return;
+    }
+
+    currentRecordingDestination = destination;
+    currentRecordingDisplayLabel = destination.getVideoDisplayName();
+    currentRecordingPath = destination.getVideoFilePath();
+    currentRecordingContentUri = destination.getVideoUri();
+    currentRecordingJsonPath = destination.getJsonFilePath();
+    currentRecordingJsonUri = destination.getJsonUri();
+    recordingFrameIndex = 0L;
+
+    try {
+      recordingDataWriter = RecordingDataWriter.start(this, destination);
+    } catch (IOException e) {
+      Log.e(TAG, "Failed to create JSON writer", e);
+      Toast.makeText(this, R.string.recording_prepare_failed, Toast.LENGTH_SHORT).show();
+      stopRecordingSessionSilently();
+      destination.deleteArtifacts(this);
+      resetRecordingState();
+      updateRecordingUiState();
+      return;
+    }
+
+    isRecording = true;
+    recordingStartElapsedRealtime = SystemClock.elapsedRealtime();
+    recordingDotVisible = true;
+    startRecordingTimer();
+    updateRecordingUiState();
+    Toast.makeText(this, R.string.recording_start_success, Toast.LENGTH_SHORT).show();
+  }
+
+  private void stopRecordingInternal() {
+    if (!isRecording || session == null) {
+      return;
+    }
+
+    boolean success = true;
+    try {
+      session.stopRecording();
+    } catch (RecordingFailedException e) {
+      Log.e(TAG, "Failed to stop ARCore recording", e);
+      Toast.makeText(this, e.getMessage(), Toast.LENGTH_SHORT).show();
+      success = false;
+    }
+
+    if (recordingDataWriter != null) {
+      recordingDataWriter.finish();
+      recordingDataWriter = null;
+    }
+
+    String displayName = currentRecordingDisplayLabel;
+    if (!success && currentRecordingDestination != null) {
+      currentRecordingDestination.deleteArtifacts(this);
+    }
+
+    resetRecordingState();
+    updateRecordingUiState();
+
+    if (success) {
+      if (!TextUtils.isEmpty(displayName)) {
+        Toast.makeText(
+                this, getString(R.string.recording_stop_success, displayName), Toast.LENGTH_LONG)
+            .show();
+      } else {
+        Toast.makeText(this, R.string.recording_stop_generic, Toast.LENGTH_SHORT).show();
+      }
+    } else {
+      Toast.makeText(this, R.string.recording_stopped_error, Toast.LENGTH_SHORT).show();
+    }
+  }
+
+  private void updateRecordingUiState() {
+    if (recordButton != null) {
+      recordButton.setBackgroundResource(
+          isRecording ? R.drawable.record_button_recording : R.drawable.record_button_idle);
+      recordButton.setContentDescription(
+          getString(isRecording ? R.string.record_button_stop : R.string.record_button_start));
+      recordButton.setEnabled(true);
+    }
+    if (recordingStatusContainer != null) {
+      recordingStatusContainer.setVisibility(isRecording ? View.VISIBLE : View.GONE);
+    }
+    if (!isRecording && recordingTimerText != null) {
+      recordingTimerText.setText(getString(R.string.recording_timer_default));
+    }
+    if (!isRecording && recordingStatusIndicator != null) {
+      recordingStatusIndicator.setVisibility(View.VISIBLE);
+      recordingDotVisible = true;
+    }
+  }
+
+  private void showRecordingOutputDialog() {
+    String[] options = {
+      getString(R.string.recording_pick_folder_option),
+      getString(R.string.recording_use_app_folder_option)
+    };
+    new AlertDialog.Builder(this)
+        .setTitle(R.string.recording_output_settings_title)
+        .setItems(
+            options,
+            (dialog, which) -> {
+              if (which == 0) {
+                directoryPickerLauncher.launch(getStoredRecordingTreeUri());
+              } else if (which == 1) {
+                File defaultDir = ensureDefaultRecordingDirectory();
+                if (defaultDir != null) {
+                  sharedPreferences
+                      .edit()
+                      .putString(PREF_RECORDING_DIR, defaultDir.getAbsolutePath())
+                      .remove(PREF_RECORDING_TREE_URI)
+                      .apply();
+                  Toast.makeText(
+                          this, R.string.recording_output_saved_default, Toast.LENGTH_SHORT)
+                      .show();
+                } else {
+                  Toast.makeText(this, R.string.recording_output_invalid_path, Toast.LENGTH_SHORT)
+                      .show();
+                }
+              }
+            })
+        .show();
+  }
+
+  private RecordingDestination createRecordingDestination() {
+    String timestamp = new SimpleDateFormat(RECORDING_TIMESTAMP_PATTERN, Locale.US).format(new Date());
+    String baseName = "AR_" + timestamp;
+
+    if (hasStoredTreeUri()) {
+      Uri treeUri = getStoredRecordingTreeUri();
+      DocumentFile treeDirectory =
+          treeUri != null ? DocumentFile.fromTreeUri(this, treeUri) : null;
+      if (treeDirectory == null || !treeDirectory.canWrite() || !treeDirectory.isDirectory()) {
+        Toast.makeText(this, R.string.recording_no_directory_error, Toast.LENGTH_SHORT).show();
+        return null;
+      }
+
+      int suffix = 0;
+      while (suffix < 1000) {
+        String candidateBase = suffix == 0 ? baseName : baseName + "_" + suffix;
+        DocumentFile existingVideo = treeDirectory.findFile(candidateBase + RECORDING_FILE_EXTENSION);
+        DocumentFile existingJson = treeDirectory.findFile(candidateBase + ".json");
+        if (existingVideo != null || existingJson != null) {
+          suffix++;
+          continue;
+        }
+
+        DocumentFile videoDoc =
+            treeDirectory.createFile(
+                RECORDING_MIME_TYPE, candidateBase + RECORDING_FILE_EXTENSION);
+        if (videoDoc == null) {
+          suffix++;
+          continue;
+        }
+
+        DocumentFile jsonDoc =
+            treeDirectory.createFile("application/json", candidateBase + ".json");
+        if (jsonDoc == null) {
+          videoDoc.delete();
+          suffix++;
+          continue;
+        }
+
+        return new RecordingDestination(
+            candidateBase,
+            videoDoc.getName(),
+            null,
+            null,
+            videoDoc.getUri(),
+            jsonDoc.getUri());
+      }
+
+      Toast.makeText(this, R.string.recording_prepare_failed, Toast.LENGTH_SHORT).show();
+      return null;
+    }
+
+    String directoryPath = getOrCreateRecordingDirectoryPath();
+    if (TextUtils.isEmpty(directoryPath)) {
+      Toast.makeText(this, R.string.recording_output_invalid_path, Toast.LENGTH_SHORT).show();
+      return null;
+    }
+
+    File directory = new File(directoryPath);
+    if (!directory.exists() && !directory.mkdirs()) {
+      Toast.makeText(this, R.string.recording_output_invalid_path, Toast.LENGTH_SHORT).show();
+      return null;
+    }
+
+    String candidateBase = baseName;
+    int suffix = 0;
+    while (true) {
+      File videoFile = new File(directory, candidateBase + RECORDING_FILE_EXTENSION);
+      File jsonFile = new File(directory, candidateBase + ".json");
+      if (!videoFile.exists() && !jsonFile.exists()) {
+        return new RecordingDestination(
+            candidateBase,
+            videoFile.getName(),
+            videoFile,
+            jsonFile,
+            null,
+            null);
+      }
+      suffix++;
+      candidateBase = baseName + "_" + suffix;
+    }
+  }
+
+  private void recordFrameData(Frame frame) {
+    if (!isRecording || recordingDataWriter == null) {
+      return;
+    }
+
+    long timestampNs = frame.getTimestamp();
+    long frameIndex = recordingFrameIndex++;
+    Map<Integer, float[]> anchorData = new LinkedHashMap<>();
+    synchronized (anchorLock) {
+      for (WrappedAnchor wrappedAnchor : wrappedAnchors) {
+        Anchor anchor = wrappedAnchor.getAnchor();
+        if (anchor.getTrackingState() != TrackingState.TRACKING) {
+          continue;
+        }
+        float[] translation = anchor.getPose().getTranslation();
+        anchorData.put(
+            wrappedAnchor.getId(), new float[] {translation[0], translation[1], translation[2]});
+      }
+    }
+
+    recordingDataWriter.appendFrame(frameIndex, timestampNs, anchorData);
+  }
+
+  private void stopRecordingSessionSilently() {
+    if (session == null) {
+      return;
+    }
+    try {
+      session.stopRecording();
+    } catch (RecordingFailedException e) {
+      Log.w(TAG, "Failed to stop recording during cleanup", e);
+    }
+  }
+
+  private void startRecordingTimer() {
+    if (recordingTimerHandler != null) {
+      recordingTimerHandler.removeCallbacks(recordingTimerRunnable);
+      recordingTimerHandler.post(recordingTimerRunnable);
+    }
+  }
+
+  private void stopRecordingTimer() {
+    if (recordingTimerHandler != null) {
+      recordingTimerHandler.removeCallbacks(recordingTimerRunnable);
+    }
+  }
+
+  private void updateRecordingTimerUi() {
+    if (!isRecording) {
+      return;
+    }
+    long elapsedMillis = SystemClock.elapsedRealtime() - recordingStartElapsedRealtime;
+    int totalSeconds = (int) (elapsedMillis / 1000L);
+    int minutes = totalSeconds / 60;
+    int seconds = totalSeconds % 60;
+    if (recordingTimerText != null) {
+      recordingTimerText.setText(String.format(Locale.US, "%02d:%02d", minutes, seconds));
+    }
+    if (recordingStatusIndicator != null) {
+      recordingStatusIndicator.setVisibility(recordingDotVisible ? View.VISIBLE : View.INVISIBLE);
+      recordingDotVisible = !recordingDotVisible;
+    }
+  }
+
+  private void resetRecordingState() {
+    stopRecordingTimer();
+    isRecording = false;
+    currentRecordingPath = null;
+    currentRecordingContentUri = null;
+    currentRecordingDisplayLabel = null;
+    currentRecordingJsonPath = null;
+    currentRecordingJsonUri = null;
+    currentRecordingDestination = null;
+    recordingStartElapsedRealtime = 0L;
+    recordingDotVisible = true;
+    recordingFrameIndex = 0L;
+  }
+
+  private boolean hasStoredTreeUri() {
+    return !TextUtils.isEmpty(sharedPreferences.getString(PREF_RECORDING_TREE_URI, null));
+  }
+
+  private Uri getStoredRecordingTreeUri() {
+    String stored = sharedPreferences.getString(PREF_RECORDING_TREE_URI, null);
+    return TextUtils.isEmpty(stored) ? null : Uri.parse(stored);
+  }
+
+  private String getOrCreateRecordingDirectoryPath() {
+    String storedPath = sharedPreferences.getString(PREF_RECORDING_DIR, null);
+    if (!TextUtils.isEmpty(storedPath)) {
+      File storedDir = new File(storedPath);
+      if (storedDir.exists() || storedDir.mkdirs()) {
+        return storedDir.getAbsolutePath();
+      }
+    }
+    File defaultDir = ensureDefaultRecordingDirectory();
+    if (defaultDir == null) {
+      return null;
+    }
+    return defaultDir.getAbsolutePath();
+  }
+
+  private File ensureDefaultRecordingDirectory() {
+    File defaultDir = new File(getExternalFilesDir(null), DEFAULT_RECORDING_SUBDIR);
+    if (!defaultDir.exists() && !defaultDir.mkdirs()) {
+      return null;
+    }
+    return defaultDir;
+  }
+
+  private static final class RecordingDestination {
+    private final String baseName;
+    private final String videoDisplayName;
+    private final File videoFile;
+    private final File jsonFile;
+    private final Uri videoUri;
+    private final Uri jsonUri;
+
+    RecordingDestination(
+        String baseName,
+        String videoDisplayName,
+        File videoFile,
+        File jsonFile,
+        Uri videoUri,
+        Uri jsonUri) {
+      this.baseName = baseName;
+      this.videoDisplayName = videoDisplayName;
+      this.videoFile = videoFile;
+      this.jsonFile = jsonFile;
+      this.videoUri = videoUri;
+      this.jsonUri = jsonUri;
+    }
+
+    String getBaseName() {
+      return baseName;
+    }
+
+    String getVideoDisplayName() {
+      return videoDisplayName;
+    }
+
+    String getVideoFilePath() {
+      return videoFile != null ? videoFile.getAbsolutePath() : null;
+    }
+
+    Uri getVideoUri() {
+      return videoUri;
+    }
+
+    String getJsonFilePath() {
+      return jsonFile != null ? jsonFile.getAbsolutePath() : null;
+    }
+
+    Uri getJsonUri() {
+      return jsonUri;
+    }
+
+    void deleteArtifacts(Context context) {
+      if (videoFile != null && videoFile.exists()) {
+        //noinspection ResultOfMethodCallIgnored
+        videoFile.delete();
+      }
+      if (jsonFile != null && jsonFile.exists()) {
+        //noinspection ResultOfMethodCallIgnored
+        jsonFile.delete();
+      }
+      if (videoUri != null) {
+        DocumentFile doc = DocumentFile.fromSingleUri(context, videoUri);
+        if (doc != null) {
+          doc.delete();
+        }
+      }
+      if (jsonUri != null) {
+        DocumentFile doc = DocumentFile.fromSingleUri(context, jsonUri);
+        if (doc != null) {
+          doc.delete();
+        }
+      }
+    }
+  }
+
+  private static final class RecordingDataWriter {
+    private static final String KEY_VIDEO = "video";
+    private static final String KEY_COORDINATE_SYSTEM = "coordinate_system";
+    private static final String KEY_UNIT = "unit";
+    private static final String KEY_FRAMES = "frames";
+    private static final String VALUE_COORDINATE_SYSTEM = "arcore_world";
+    private static final String VALUE_UNIT = "meters";
+
+    private final ExecutorService executor;
+    private final OutputStream outputStream;
+    private final JsonWriter jsonWriter;
+    private final String videoDisplayName;
+    private final boolean ownsFile;
+    private final RecordingDestination destination;
+    private boolean closed = false;
+
+    static RecordingDataWriter start(Context context, RecordingDestination destination)
+        throws IOException {
+      OutputStream outputStream;
+      boolean ownsFile = false;
+      if (destination.getJsonFilePath() != null) {
+        File jsonFile = new File(destination.getJsonFilePath());
+        outputStream = new BufferedOutputStream(new FileOutputStream(jsonFile));
+        ownsFile = true;
+      } else if (destination.getJsonUri() != null) {
+        outputStream =
+            new BufferedOutputStream(
+                context.getContentResolver().openOutputStream(destination.getJsonUri(), "w"));
+        if (outputStream == null) {
+          throw new IOException("Unable to open JSON output stream");
+        }
+      } else {
+        throw new IOException("No JSON destination available");
+      }
+
+      JsonWriter writer =
+          new JsonWriter(new OutputStreamWriter(outputStream, StandardCharsets.UTF_8));
+      writer.setIndent("  ");
+
+      ExecutorService executor = Executors.newSingleThreadExecutor();
+      RecordingDataWriter dataWriter =
+          new RecordingDataWriter(executor, outputStream, writer, destination, ownsFile);
+      dataWriter.writeHeader();
+      return dataWriter;
+    }
+
+    private RecordingDataWriter(
+        ExecutorService executor,
+        OutputStream outputStream,
+        JsonWriter jsonWriter,
+        RecordingDestination destination,
+        boolean ownsFile)
+        throws IOException {
+      this.executor = executor;
+      this.outputStream = outputStream;
+      this.jsonWriter = jsonWriter;
+      this.destination = destination;
+      this.videoDisplayName = destination.getVideoDisplayName();
+      this.ownsFile = ownsFile;
+    }
+
+    private void writeHeader() throws IOException {
+      jsonWriter.beginObject();
+      jsonWriter.name(KEY_VIDEO).value(videoDisplayName);
+      jsonWriter.name(KEY_COORDINATE_SYSTEM).value(VALUE_COORDINATE_SYSTEM);
+      jsonWriter.name(KEY_UNIT).value(VALUE_UNIT);
+      jsonWriter.name(KEY_FRAMES);
+      jsonWriter.beginObject();
+      jsonWriter.flush();
+    }
+
+    void appendFrame(long frameIndex, long timestampNs, Map<Integer, float[]> anchors) {
+      if (closed) {
+        return;
+      }
+      try {
+        executor.submit(
+            () -> {
+              try {
+                if (anchors.isEmpty()) {
+                  return;
+                }
+                jsonWriter.name(Long.toString(frameIndex));
+                jsonWriter.beginObject();
+                jsonWriter.name("timestamp_ns").value(timestampNs);
+                jsonWriter.name("anchors");
+                jsonWriter.beginObject();
+                for (Map.Entry<Integer, float[]> entry : anchors.entrySet()) {
+                  jsonWriter.name("anchor_" + entry.getKey());
+                  float[] values = entry.getValue();
+                  jsonWriter.beginObject();
+                  jsonWriter.name("x").value(values[0]);
+                  jsonWriter.name("y").value(values[1]);
+                  jsonWriter.name("z").value(values[2]);
+                  jsonWriter.endObject();
+                }
+                jsonWriter.endObject();
+                jsonWriter.endObject();
+                jsonWriter.flush();
+              } catch (IOException e) {
+                Log.e(TAG, "Failed to write frame data", e);
+              }
+            });
+      } catch (RejectedExecutionException e) {
+        Log.w(TAG, "Recording data writer executor rejected frame", e);
+      }
+    }
+
+    void finish() {
+      if (closed) {
+        return;
+      }
+      closed = true;
+      executor.shutdown();
+      try {
+        executor.awaitTermination(2, TimeUnit.SECONDS);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+      }
+      try {
+        jsonWriter.endObject();
+        jsonWriter.endObject();
+        jsonWriter.flush();
+      } catch (IOException e) {
+        Log.e(TAG, "Failed to finish JSON writing", e);
+      }
+      try {
+        jsonWriter.close();
+      } catch (IOException e) {
+        Log.w(TAG, "Failed to close JsonWriter", e);
+      }
+      try {
+        outputStream.close();
+      } catch (IOException e) {
+        Log.w(TAG, "Failed to close JSON output stream", e);
+      }
+    }
   }
 
   // Handle only one tap per frame, as taps are usually low frequency compared to frame rate.

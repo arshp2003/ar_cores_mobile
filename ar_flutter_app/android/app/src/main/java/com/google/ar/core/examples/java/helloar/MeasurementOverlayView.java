@@ -421,6 +421,18 @@ public class MeasurementOverlayView extends View {
       anchorPaint.setTextSize(textSize);
       canvas.drawText(ANCHOR_EMOJI, point.x, textBaseline, anchorPaint);
 
+      String idLabel = String.format(Locale.US, "%d", anchorId);
+      float idTextSize = textSize * 0.45f;
+      anchorPaint.setTextSize(idTextSize);
+      float idBaseline = textBaseline + radius * 0.55f;
+
+      anchorPaint.setStyle(Paint.Style.STROKE);
+      anchorPaint.setStrokeWidth(Math.max(2f, idTextSize * 0.1f));
+      canvas.drawText(idLabel, point.x, idBaseline, anchorPaint);
+      anchorPaint.setStyle(Paint.Style.FILL);
+      anchorPaint.setStrokeWidth(0f);
+      canvas.drawText(idLabel, point.x, idBaseline, anchorPaint);
+
       float deleteX = point.x + radius * 0.7f;
       float deleteY = point.y - radius * 0.7f;
       canvas.drawCircle(deleteX, deleteY, ANCHOR_DELETE_RADIUS, deletePaint);

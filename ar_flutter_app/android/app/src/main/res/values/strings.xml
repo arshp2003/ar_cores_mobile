@@ -33,5 +33,25 @@
   <string translatable="false" name="measurement_initial">Place at least two anchors.</string>
   <string name="measurement_summary">Anchors: %1$d | Last: %2$.2f m | Total: %3$.2f m</string>
   <string name="reset_button_label">Reset</string>
+  <string name="record_button_start">Start Recording</string>
+  <string name="record_button_stop">Stop Recording</string>
+  <string name="recording_output_settings_title">Recording Output Location</string>
+  <string name="recording_start_success">Recording started.</string>
+  <string name="recording_stop_success">Recording saved: %1$s</string>
+  <string name="recording_stop_generic">Recording stopped.</string>
+  <string name="recording_output_invalid_path">Unable to use the selected folder.</string>
+  <string name="recording_output_saved_uri">Recording folder updated.</string>
+  <string name="recording_output_saved_path">Recording folder set to %1$s</string>
+  <string name="recording_in_progress_warning">Recording is in progress.</string>
+  <string name="recording_timer_default">00:00</string>
+  <string name="recording_no_directory_error">Unable to access the selected directory.</string>
+  <string name="recording_directory_picker_unavailable">No directory was selected.</string>
+  <string name="recording_pick_folder_option">Choose folder…</string>
+  <string name="recording_use_app_folder_option">Use app storage (default)</string>
+  <string name="recording_output_saved_default">Recording folder set to app storage.</string>
+  <string name="recording_status_indicator_content_description">Recording status indicator</string>
+  <string name="recording_permission_denied">Screen capture permission was denied.</string>
+  <string name="recording_prepare_failed">Unable to start screen recording.</string>
+  <string name="recording_stopped_error">Recording stopped due to an error.</string>
 
 </resources>
