@@ -53,5 +53,11 @@
   <string name="recording_permission_denied">Screen capture permission was denied.</string>
   <string name="recording_prepare_failed">Unable to start screen recording.</string>
   <string name="recording_stopped_error">Recording stopped due to an error.</string>
+  <string name="recording_audio_toggle_label">Record microphone audio</string>
+  <string name="recording_audio_toggle_description">Include ambient sound and narration in the saved video.</string>
+  <string name="screen_recording_channel_name">Screen recording</string>
+  <string name="screen_recording_channel_description">Shows status while screen recording is active.</string>
+  <string name="screen_recording_notification_title">Screen recording in progress</string>
+  <string name="screen_recording_notification_message">Tap to return to the AR session and stop recording.</string>
 
 </resources>

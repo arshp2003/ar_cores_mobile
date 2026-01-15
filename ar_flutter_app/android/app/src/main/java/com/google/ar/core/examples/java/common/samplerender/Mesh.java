@@ -15,6 +15,8 @@
  */
 package com.google.ar.core.examples.java.common.samplerender;
 
+import android.opengl.EGL14;
+import android.opengl.EGLContext;
 import android.opengl.GLES30;
 import android.util.Log;
 import de.javagl.obj.Obj;
@@ -26,6 +28,8 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.FloatBuffer;
 import java.nio.IntBuffer;
+import java.util.IdentityHashMap;
+import java.util.Map;
 
 /**
  * A collection of vertices, faces, and other attributes that define how to render a 3D object.
@@ -59,7 +63,7 @@ public class Mesh implements Closeable {
     }
   }
 
-  private final int[] vertexArrayId = {0};
+  private final Map<EGLContext, int[]> vertexArrays = new IdentityHashMap<>();
   private final PrimitiveMode primitiveMode;
   private final IndexBuffer indexBuffer;
   private final VertexBuffer[] vertexBuffers;
@@ -90,30 +94,7 @@ public class Mesh implements Closeable {
     this.vertexBuffers = vertexBuffers;
 
     try {
-      // Create vertex array
-      GLES30.glGenVertexArrays(1, vertexArrayId, 0);
-      GLError.maybeThrowGLException("Failed to generate a vertex array", "glGenVertexArrays");
-
-      // Bind vertex array
-      GLES30.glBindVertexArray(vertexArrayId[0]);
-      GLError.maybeThrowGLException("Failed to bind vertex array object", "glBindVertexArray");
-
-      if (indexBuffer != null) {
-        GLES30.glBindBuffer(GLES30.GL_ELEMENT_ARRAY_BUFFER, indexBuffer.getBufferId());
-      }
-
-      for (int i = 0; i < vertexBuffers.length; ++i) {
-        // Bind each vertex buffer to vertex array
-        GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, vertexBuffers[i].getBufferId());
-        GLError.maybeThrowGLException("Failed to bind vertex buffer", "glBindBuffer");
-        GLES30.glVertexAttribPointer(
-            i, vertexBuffers[i].getNumberOfEntriesPerVertex(), GLES30.GL_FLOAT, false, 0, 0);
-        GLError.maybeThrowGLException(
-            "Failed to associate vertex buffer with vertex array", "glVertexAttribPointer");
-        GLES30.glEnableVertexAttribArray(i);
-        GLError.maybeThrowGLException(
-            "Failed to enable vertex buffer", "glEnableVertexAttribArray");
-      }
+      ensureVertexArrayObject();
     } catch (Throwable t) {
       close();
       throw t;
@@ -151,10 +132,23 @@ public class Mesh implements Closeable {
 
   @Override
   public void close() {
-    if (vertexArrayId[0] != 0) {
-      GLES30.glDeleteVertexArrays(1, vertexArrayId, 0);
-      GLError.maybeLogGLError(
-          Log.WARN, TAG, "Failed to free vertex array object", "glDeleteVertexArrays");
+    EGLContext currentContext = EGL14.eglGetCurrentContext();
+    if (currentContext != null && currentContext != EGL14.EGL_NO_CONTEXT) {
+      int[] handle = vertexArrays.remove(currentContext);
+      if (handle != null && handle[0] != 0) {
+        GLES30.glDeleteVertexArrays(1, handle, 0);
+        GLError.maybeLogGLError(
+            Log.WARN, TAG, "Failed to free vertex array object", "glDeleteVertexArrays");
+      }
+    } else {
+      for (int[] handle : vertexArrays.values()) {
+        if (handle != null && handle[0] != 0) {
+          GLES30.glDeleteVertexArrays(1, handle, 0);
+          GLError.maybeLogGLError(
+              Log.WARN, TAG, "Failed to free vertex array object", "glDeleteVertexArrays");
+        }
+      }
+      vertexArrays.clear();
     }
   }
 
@@ -163,11 +157,9 @@ public class Mesh implements Closeable {
    * prefer {@link SampleRender#draw}.
    */
   public void lowLevelDraw() {
-    if (vertexArrayId[0] == 0) {
-      throw new IllegalStateException("Tried to draw a freed Mesh");
-    }
+    int[] vao = ensureVertexArrayObject();
 
-    GLES30.glBindVertexArray(vertexArrayId[0]);
+    GLES30.glBindVertexArray(vao[0]);
     GLError.maybeThrowGLException("Failed to bind vertex array object", "glBindVertexArray");
     if (indexBuffer == null) {
       // Sanity check for debugging
@@ -190,5 +182,42 @@ public class Mesh implements Closeable {
       GLError.maybeThrowGLException(
           "Failed to draw vertex array object with indices", "glDrawElements");
     }
+  }
+
+  private int[] ensureVertexArrayObject() {
+    EGLContext currentContext = EGL14.eglGetCurrentContext();
+    if (currentContext == null || currentContext == EGL14.EGL_NO_CONTEXT) {
+      throw new IllegalStateException("Unable to create VAO without current EGL context");
+    }
+    int[] vaoId = vertexArrays.get(currentContext);
+    if (vaoId != null && vaoId[0] != 0) {
+      return vaoId;
+    }
+
+    vaoId = new int[1];
+    GLES30.glGenVertexArrays(1, vaoId, 0);
+    GLError.maybeThrowGLException("Failed to generate a vertex array", "glGenVertexArrays");
+
+    GLES30.glBindVertexArray(vaoId[0]);
+    GLError.maybeThrowGLException("Failed to bind vertex array object", "glBindVertexArray");
+
+    if (indexBuffer != null) {
+      GLES30.glBindBuffer(GLES30.GL_ELEMENT_ARRAY_BUFFER, indexBuffer.getBufferId());
+    }
+
+    for (int i = 0; i < vertexBuffers.length; ++i) {
+      GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, vertexBuffers[i].getBufferId());
+      GLError.maybeThrowGLException("Failed to bind vertex buffer", "glBindBuffer");
+      GLES30.glVertexAttribPointer(
+          i, vertexBuffers[i].getNumberOfEntriesPerVertex(), GLES30.GL_FLOAT, false, 0, 0);
+      GLError.maybeThrowGLException(
+          "Failed to associate vertex buffer with vertex array", "glVertexAttribPointer");
+      GLES30.glEnableVertexAttribArray(i);
+      GLError.maybeThrowGLException(
+          "Failed to enable vertex buffer", "glEnableVertexAttribArray");
+    }
+
+    vertexArrays.put(currentContext, vaoId);
+    return vaoId;
   }
 }

@@ -1,6 +1,7 @@
 # Miscellaneous
 *.class
 *.log
+# !crash_test_wifi.log
 *.pyc
 *.swp
 .DS_Store

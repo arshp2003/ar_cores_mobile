@@ -25,6 +25,7 @@ import com.google.ar.core.examples.java.common.samplerender.SampleRender;
 import com.google.ar.core.examples.java.common.samplerender.Shader;
 import com.google.ar.core.examples.java.common.samplerender.Texture;
 import com.google.ar.core.examples.java.common.samplerender.VertexBuffer;
+import java.io.Closeable;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -36,7 +37,7 @@ import java.util.HashMap;
  * background can be rendered as either camera image data or camera depth data. The virtual scene
  * can be composited with or without depth occlusion.
  */
-public class BackgroundRenderer {
+public class BackgroundRenderer implements Closeable {
   private static final String TAG = BackgroundRenderer.class.getSimpleName();
 
   // components_per_vertex * number_of_vertices * float_size
@@ -62,8 +63,10 @@ public class BackgroundRenderer {
   private final FloatBuffer cameraTexCoords =
       ByteBuffer.allocateDirect(COORDS_BUFFER_SIZE).order(ByteOrder.nativeOrder()).asFloatBuffer();
 
+  private final VertexBuffer screenCoordsVertexBuffer;
   private final Mesh mesh;
   private final VertexBuffer cameraTexCoordsVertexBuffer;
+  private final VertexBuffer virtualSceneTexCoordsVertexBuffer;
   private Shader backgroundShader;
   private Shader occlusionShader;
   private final Texture cameraDepthTexture;
@@ -96,17 +99,49 @@ public class BackgroundRenderer {
     // Create a Mesh with three vertex buffers: one for the screen coordinates (normalized device
     // coordinates), one for the camera texture coordinates (to be populated with proper data later
     // before drawing), and one for the virtual scene texture coordinates (unit texture quad)
-    VertexBuffer screenCoordsVertexBuffer =
+    screenCoordsVertexBuffer =
         new VertexBuffer(render, /* numberOfEntriesPerVertex=*/ 2, NDC_QUAD_COORDS_BUFFER);
     cameraTexCoordsVertexBuffer =
         new VertexBuffer(render, /*numberOfEntriesPerVertex=*/ 2, /*entries=*/ null);
-    VertexBuffer virtualSceneTexCoordsVertexBuffer =
+    virtualSceneTexCoordsVertexBuffer =
         new VertexBuffer(render, /* numberOfEntriesPerVertex=*/ 2, VIRTUAL_SCENE_TEX_COORDS_BUFFER);
     VertexBuffer[] vertexBuffers = {
       screenCoordsVertexBuffer, cameraTexCoordsVertexBuffer, virtualSceneTexCoordsVertexBuffer,
     };
     mesh =
         new Mesh(render, Mesh.PrimitiveMode.TRIANGLE_STRIP, /*indexBuffer=*/ null, vertexBuffers);
+  }
+
+  @Override
+  public void close() {
+    if (backgroundShader != null) {
+      backgroundShader.close();
+      backgroundShader = null;
+    }
+    if (occlusionShader != null) {
+      occlusionShader.close();
+      occlusionShader = null;
+    }
+    if (depthColorPaletteTexture != null) {
+      depthColorPaletteTexture.close();
+      depthColorPaletteTexture = null;
+    }
+
+    cameraDepthTexture.close();
+    cameraColorTexture.close();
+
+    if (mesh != null) {
+      mesh.close();
+    }
+    if (cameraTexCoordsVertexBuffer != null) {
+      cameraTexCoordsVertexBuffer.close();
+    }
+    if (virtualSceneTexCoordsVertexBuffer != null) {
+      virtualSceneTexCoordsVertexBuffer.close();
+    }
+    if (screenCoordsVertexBuffer != null) {
+      screenCoordsVertexBuffer.close();
+    }
   }
 
   /**

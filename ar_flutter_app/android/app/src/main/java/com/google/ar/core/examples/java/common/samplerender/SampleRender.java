@@ -18,6 +18,8 @@ package com.google.ar.core.examples.java.common.samplerender;
 import android.content.res.AssetManager;
 import android.opengl.GLES30;
 import android.opengl.GLSurfaceView;
+import android.opengl.GLException;
+import android.util.Log;
 import javax.microedition.khronos.egl.EGLConfig;
 import javax.microedition.khronos.opengles.GL10;
 
@@ -94,10 +96,57 @@ public class SampleRender {
     useFramebuffer(framebuffer);
     GLES30.glClearColor(r, g, b, a);
     GLError.maybeThrowGLException("Failed to set clear color", "glClearColor");
-    GLES30.glDepthMask(true);
-    GLError.maybeThrowGLException("Failed to set depth write mask", "glDepthMask");
-    GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT | GLES30.GL_DEPTH_BUFFER_BIT);
-    GLError.maybeThrowGLException("Failed to clear framebuffer", "glClear");
+    boolean hasDepthBuffer;
+    if (framebuffer == null) {
+      int[] depthBits = new int[1];
+      GLES30.glGetIntegerv(GLES30.GL_DEPTH_BITS, depthBits, 0);
+      hasDepthBuffer = depthBits[0] > 0;
+    } else {
+      int[] depthAttachmentType = new int[1];
+      GLES30.glGetFramebufferAttachmentParameteriv(
+          GLES30.GL_FRAMEBUFFER,
+          GLES30.GL_DEPTH_ATTACHMENT,
+          GLES30.GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE,
+          depthAttachmentType,
+          0);
+      hasDepthBuffer = depthAttachmentType[0] != GLES30.GL_NONE;
+    }
+    int clearMask = GLES30.GL_COLOR_BUFFER_BIT;
+    if (hasDepthBuffer) {
+      GLES30.glDepthMask(true);
+      GLError.maybeThrowGLException("Failed to set depth write mask", "glDepthMask");
+      clearMask |= GLES30.GL_DEPTH_BUFFER_BIT;
+    }
+
+    GLES30.glClear(clearMask);
+    int clearError = GLES30.glGetError();
+    if (clearError != GLES30.GL_NO_ERROR) {
+      // Retry without depth bit for recorder surfaces that misreport depth support.
+      GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT);
+      int fallbackError = GLES30.glGetError();
+      if (fallbackError != GLES30.GL_NO_ERROR) {
+        Log.w(TAG, "glClear failed on recording surface, continuing without clear. error=" + fallbackError);
+      }
+    }
+  }
+
+  /**
+   * Executes the provided {@link Runnable} while treating the default framebuffer as having the
+   * supplied dimensions.
+   */
+  public void withDefaultFramebufferDimensions(int width, int height, Runnable runnable) {
+    int previousWidth = viewportWidth;
+    int previousHeight = viewportHeight;
+    viewportWidth = width;
+    viewportHeight = height;
+    try {
+      runnable.run();
+    } finally {
+      viewportWidth = previousWidth;
+      viewportHeight = previousHeight;
+      GLES30.glViewport(0, 0, previousWidth, previousHeight);
+      GLError.maybeThrowGLException("Failed to restore viewport dimensions", "glViewport");
+    }
   }
 
   /** Interface to be implemented for rendering callbacks. */

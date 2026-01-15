@@ -2,6 +2,8 @@
 
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
 
     <uses-feature android:name="android.hardware.camera" android:required="true" />
     <uses-feature android:name="android.hardware.camera.ar" android:required="true" />
@@ -41,6 +43,10 @@
             android:screenOrientation="locked"
             android:theme="@style/Theme.AppCompat.NoActionBar" />
 
+        <service
+            android:name="com.google.ar.core.examples.java.helloar.ScreenRecordingForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection|camera" />
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

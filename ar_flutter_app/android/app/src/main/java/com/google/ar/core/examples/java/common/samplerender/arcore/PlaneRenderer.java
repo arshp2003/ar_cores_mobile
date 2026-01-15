@@ -27,6 +27,7 @@ import com.google.ar.core.examples.java.common.samplerender.Shader;
 import com.google.ar.core.examples.java.common.samplerender.Shader.BlendFactor;
 import com.google.ar.core.examples.java.common.samplerender.Texture;
 import com.google.ar.core.examples.java.common.samplerender.VertexBuffer;
+import java.io.Closeable;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -41,7 +42,7 @@ import java.util.List;
 import java.util.Map;
 
 /** Renders the detected AR planes. */
-public class PlaneRenderer {
+public class PlaneRenderer implements Closeable {
   private static final String TAG = PlaneRenderer.class.getSimpleName();
 
   // Shader names.
@@ -81,6 +82,7 @@ public class PlaneRenderer {
   private final IndexBuffer indexBufferObject;
   private final VertexBuffer vertexBufferObject;
   private final Shader shader;
+  private final Texture texture;
 
   private FloatBuffer vertexBuffer =
       ByteBuffer.allocateDirect(INITIAL_VERTEX_BUFFER_SIZE_BYTES)
@@ -108,7 +110,7 @@ public class PlaneRenderer {
    * SampleRender.Renderer#onSurfaceCreated}.
    */
   public PlaneRenderer(SampleRender render) throws IOException {
-    Texture texture =
+    texture =
         Texture.createFromAsset(
             render, TEXTURE_NAME, Texture.WrapMode.REPEAT, Texture.ColorFormat.LINEAR);
     shader =
@@ -126,6 +128,25 @@ public class PlaneRenderer {
     vertexBufferObject = new VertexBuffer(render, COORDS_PER_VERTEX, /*entries=*/ null);
     VertexBuffer[] vertexBuffers = {vertexBufferObject};
     mesh = new Mesh(render, Mesh.PrimitiveMode.TRIANGLE_STRIP, indexBufferObject, vertexBuffers);
+  }
+
+  @Override
+  public void close() {
+    if (shader != null) {
+      shader.close();
+    }
+    if (mesh != null) {
+      mesh.close();
+    }
+    if (indexBufferObject != null) {
+      indexBufferObject.close();
+    }
+    if (vertexBufferObject != null) {
+      vertexBufferObject.close();
+    }
+    if (texture != null) {
+      texture.close();
+    }
   }
 
   /** Updates the plane model transform matrix and extents. */

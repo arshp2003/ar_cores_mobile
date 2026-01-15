@@ -16,13 +16,20 @@
 
 package com.google.ar.core.examples.java.helloar;
 
+import android.app.Activity;
+import android.content.ActivityNotFoundException;
 import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.res.Resources;
 import android.graphics.PointF;
+import android.hardware.display.DisplayManager;
+import android.hardware.display.VirtualDisplay;
 import android.media.Image;
+import android.media.MediaRecorder;
+import android.media.projection.MediaProjection;
+import android.media.projection.MediaProjectionManager;
 import android.net.Uri;
 import android.opengl.GLES30;
 import android.opengl.GLSurfaceView;
@@ -30,21 +37,31 @@ import android.opengl.Matrix;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.ParcelFileDescriptor;
 import android.os.SystemClock;
+import android.util.DisplayMetrics;
 import android.util.Log;
 import android.util.JsonWriter;
+import android.util.JsonReader;
+import android.util.JsonToken;
+import android.view.Display;
 import android.view.MenuItem;
 import android.view.MotionEvent;
+import android.view.Surface;
 import android.view.View;
+import android.view.WindowManager;
 import android.widget.Button;
 import android.widget.ImageButton;
 import android.widget.PopupMenu;
 import android.widget.TextView;
 import android.widget.Toast;
+import androidx.activity.result.ActivityResult;
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
+import androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.appcompat.widget.SwitchCompat;
 import androidx.documentfile.provider.DocumentFile;
 import android.text.TextUtils;
 import com.google.ar.core.Anchor;
@@ -66,7 +83,6 @@ import com.google.ar.core.Session;
 import com.google.ar.core.Trackable;
 import com.google.ar.core.TrackingFailureReason;
 import com.google.ar.core.TrackingState;
-import com.google.ar.core.RecordingConfig;
 import com.google.ar.core.Pose;
 import com.google.ar.core.examples.java.common.helpers.CameraPermissionHelper;
 import com.google.ar.core.examples.java.common.helpers.DepthSettings;
@@ -88,13 +104,13 @@ import com.google.ar.core.examples.java.common.samplerender.arcore.PlaneRenderer
 import com.google.ar.core.examples.java.common.samplerender.arcore.SpecularCubemapFilter;
 import com.google.ar.core.exceptions.CameraNotAvailableException;
 import com.google.ar.core.exceptions.NotYetAvailableException;
-import com.google.ar.core.exceptions.RecordingFailedException;
 import com.google.ar.core.exceptions.UnavailableApkTooOldException;
 import com.google.ar.core.exceptions.UnavailableArcoreNotInstalledException;
 import com.google.ar.core.exceptions.UnavailableDeviceNotCompatibleException;
 import com.google.ar.core.exceptions.UnavailableSdkTooOldException;
 import com.google.ar.core.exceptions.UnavailableUserDeclinedInstallationException;
 import java.io.File;
+import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -103,10 +119,13 @@ import java.io.OutputStreamWriter;
 import java.io.BufferedOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.ByteBuffer;
+import java.nio.FloatBuffer;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -116,6 +135,7 @@ import java.util.Date;
 import java.text.SimpleDateFormat;
 import java.util.Locale;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -135,6 +155,7 @@ public class HelloArActivity extends AppCompatActivity implements SampleRender.R
   private static final String PREFS_NAME = "hello_ar_prefs";
   private static final String PREF_RECORDING_DIR = "recording_output_dir";
   private static final String PREF_RECORDING_TREE_URI = "recording_output_tree_uri";
+  private static final String PREF_RECORDING_AUDIO_ENABLED = "recording_audio_enabled";
   private static final String RECORDING_TIMESTAMP_PATTERN = "yyyyMMdd_HHmmss";
   private static final String RECORDING_FILE_EXTENSION = ".mp4";
   private static final String DEFAULT_RECORDING_SUBDIR = "ar_recordings";
@@ -167,6 +188,8 @@ public class HelloArActivity extends AppCompatActivity implements SampleRender.R
   private boolean installRequested;
 
   private Session session;
+  private static final String SCREEN_CAPTURE_DISPLAY_NAME = "HelloArScreenCapture";
+
   private final SnackbarHelper messageSnackbarHelper = new SnackbarHelper();
   private DisplayRotationHelper displayRotationHelper;
   private final TrackingStateHelper trackingStateHelper = new TrackingStateHelper(this);
@@ -180,6 +203,7 @@ public class HelloArActivity extends AppCompatActivity implements SampleRender.R
   private TextView recordingTimerText;
   private Handler recordingTimerHandler;
   private long recordingStartElapsedRealtime = 0L;
+  private boolean startRecordingRequested = false;
   private final Runnable recordingTimerRunnable =
       new Runnable() {
         @Override
@@ -205,6 +229,19 @@ public class HelloArActivity extends AppCompatActivity implements SampleRender.R
   private RecordingDestination currentRecordingDestination = null;
   private RecordingDataWriter recordingDataWriter = null;
   private long recordingFrameIndex = 0L;
+  private MediaProjectionManager mediaProjectionManager;
+  private MediaProjection mediaProjection;
+  private MediaProjection.Callback mediaProjectionCallback;
+  private MediaRecorder mediaRecorder;
+  private VirtualDisplay virtualDisplay;
+  private ActivityResultLauncher<Intent> screenCaptureLauncher;
+  private RecordingDestination pendingRecordingDestination = null;
+  private final Object planeLock = new Object();
+  private final Map<Plane, Integer> planeIds = new IdentityHashMap<>();
+  private int nextPlaneId = 1;
+  private ParcelFileDescriptor recordingParcelFileDescriptor = null;
+  private boolean pendingStartAfterPermission = false;
+  private boolean shouldRecordAudio = false;
 
   private MeasurementOverlayView measurementOverlayView;
 
@@ -236,6 +273,11 @@ public class HelloArActivity extends AppCompatActivity implements SampleRender.R
   private VertexBuffer pointCloudVertexBuffer;
   private Mesh pointCloudMesh;
   private Shader pointCloudShader;
+  private VertexBuffer anchorPointVertexBuffer;
+  private Mesh anchorPointMesh;
+  private Shader anchorPointShader;
+  private FloatBuffer anchorPointFloatBuffer;
+  private final float[] anchorPointTmpTranslation = new float[3];
   // Keep track of the last point cloud rendered to avoid updating the VBO if point cloud
   // was not changed.  Do this using the timestamp since we can't compare PointCloud objects.
   private long lastPointCloudTimestamp = 0;
@@ -245,6 +287,7 @@ public class HelloArActivity extends AppCompatActivity implements SampleRender.R
   private Shader virtualObjectShader;
   private Texture virtualObjectAlbedoTexture;
   private Texture virtualObjectAlbedoInstantPlacementTexture;
+  private Texture virtualObjectPbrTexture;
 
   private final List<WrappedAnchor> wrappedAnchors = new ArrayList<>();
 
@@ -271,6 +314,27 @@ public class HelloArActivity extends AppCompatActivity implements SampleRender.R
     measurementOverlayView = findViewById(R.id.measurement_overlay_view);
 
     sharedPreferences = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+    shouldRecordAudio = sharedPreferences.getBoolean(PREF_RECORDING_AUDIO_ENABLED, false);
+    mediaProjectionManager =
+        (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
+    screenCaptureLauncher =
+        registerForActivityResult(
+            new StartActivityForResult(),
+            result -> {
+              if (result.getResultCode() == Activity.RESULT_OK && result.getData() != null) {
+                startScreenRecordingWithPermissionResult(result);
+              } else {
+                Log.w(TAG, "Screen capture permission denied");
+                if (pendingRecordingDestination != null) {
+                  pendingRecordingDestination.deleteArtifacts(this);
+                }
+                pendingRecordingDestination = null;
+                pendingStartAfterPermission = false;
+                resetRecordingState();
+                updateRecordingUiState();
+                Toast.makeText(this, R.string.recording_prepare_failed, Toast.LENGTH_SHORT).show();
+              }
+            });
 
     recordButton = findViewById(R.id.record_button);
     recordingStatusContainer = findViewById(R.id.recording_status_container);
@@ -458,6 +522,16 @@ public class HelloArActivity extends AppCompatActivity implements SampleRender.R
 
   @Override
   protected void onDestroy() {
+    try {
+      if (isRecording) {
+        stopRecordingInternal();
+      }
+    } catch (RuntimeException e) {
+      Log.w(TAG, "Failed to stop recorder during onDestroy", e);
+    }
+
+    releaseGlResources();
+
     if (session != null) {
       // Explicitly close ARCore Session to release native resources.
       // Review the API reference for important considerations before calling close() in apps with
@@ -562,6 +636,89 @@ public class HelloArActivity extends AppCompatActivity implements SampleRender.R
     }
   }
 
+  private void releaseGlResources() {
+    hasSetTextureNames = false;
+
+    if (surfaceView == null) {
+      return;
+    }
+
+    surfaceView.queueEvent(
+        () -> {
+          if (virtualSceneFramebuffer != null) {
+            virtualSceneFramebuffer.close();
+            virtualSceneFramebuffer = null;
+          }
+
+          if (backgroundRenderer != null) {
+            backgroundRenderer.close();
+            backgroundRenderer = null;
+          }
+
+          if (planeRenderer != null) {
+            planeRenderer.close();
+            planeRenderer = null;
+          }
+
+          if (pointCloudMesh != null) {
+            pointCloudMesh.close();
+            pointCloudMesh = null;
+          }
+          if (pointCloudVertexBuffer != null) {
+            pointCloudVertexBuffer.close();
+            pointCloudVertexBuffer = null;
+          }
+          if (pointCloudShader != null) {
+            pointCloudShader.close();
+            pointCloudShader = null;
+          }
+
+          if (anchorPointMesh != null) {
+            anchorPointMesh.close();
+            anchorPointMesh = null;
+          }
+          if (anchorPointVertexBuffer != null) {
+            anchorPointVertexBuffer.close();
+            anchorPointVertexBuffer = null;
+          }
+          if (anchorPointShader != null) {
+            anchorPointShader.close();
+            anchorPointShader = null;
+          }
+          anchorPointFloatBuffer = null;
+
+          if (virtualObjectMesh != null) {
+            virtualObjectMesh.close();
+            virtualObjectMesh = null;
+          }
+          if (virtualObjectShader != null) {
+            virtualObjectShader.close();
+            virtualObjectShader = null;
+          }
+          if (virtualObjectAlbedoTexture != null) {
+            virtualObjectAlbedoTexture.close();
+            virtualObjectAlbedoTexture = null;
+          }
+          if (virtualObjectAlbedoInstantPlacementTexture != null) {
+            virtualObjectAlbedoInstantPlacementTexture.close();
+            virtualObjectAlbedoInstantPlacementTexture = null;
+          }
+          if (virtualObjectPbrTexture != null) {
+            virtualObjectPbrTexture.close();
+            virtualObjectPbrTexture = null;
+          }
+
+          if (cubemapFilter != null) {
+            cubemapFilter.close();
+            cubemapFilter = null;
+          }
+          if (dfgTexture != null) {
+            dfgTexture.close();
+            dfgTexture = null;
+          }
+        });
+  }
+
   @Override
   public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
     super.onRequestPermissionsResult(requestCode, permissions, results);
@@ -645,6 +802,24 @@ public class HelloArActivity extends AppCompatActivity implements SampleRender.R
           new Mesh(
               render, Mesh.PrimitiveMode.POINTS, /* indexBuffer= */ null, pointCloudVertexBuffers);
 
+      anchorPointShader =
+          Shader.createFromAssets(
+                  render,
+                  "shaders/point_cloud.vert",
+                  "shaders/point_cloud.frag",
+                  /* defines= */ null)
+              .setVec4("u_Color", new float[] {1.0f, 0.2f, 0.2f, 1.0f})
+              .setFloat("u_PointSize", 28.0f);
+      anchorPointVertexBuffer =
+          new VertexBuffer(render, /* numberOfEntriesPerVertex= */ 4, /* entries= */ null);
+      final VertexBuffer[] anchorPointVertexBuffers = {anchorPointVertexBuffer};
+      anchorPointMesh =
+          new Mesh(
+              render,
+              Mesh.PrimitiveMode.POINTS,
+              /* indexBuffer= */ null,
+              anchorPointVertexBuffers);
+
       // Virtual object to render (ARCore pawn)
       virtualObjectAlbedoTexture =
           Texture.createFromAsset(
@@ -658,7 +833,7 @@ public class HelloArActivity extends AppCompatActivity implements SampleRender.R
               "models/pawn_albedo_instant_placement.png",
               Texture.WrapMode.CLAMP_TO_EDGE,
               Texture.ColorFormat.SRGB);
-      Texture virtualObjectPbrTexture =
+      virtualObjectPbrTexture =
           Texture.createFromAsset(
               render,
               "models/pawn_roughness_metallic_ao.png",
@@ -781,81 +956,141 @@ public class HelloArActivity extends AppCompatActivity implements SampleRender.R
       messageSnackbarHelper.showMessage(this, message);
     }
 
-    // -- Draw background
+    boolean renderedScene =
+        drawScene(
+            render,
+            frame,
+            camera,
+            /*updatePointCloudBuffer=*/ true,
+            /*updateLightEstimation=*/ true);
 
+    if (renderedScene) {
+      recordFrameData(frame);
+      updateMeasurementUi(viewMatrix, projectionMatrix);
+    }
+    
+    // Check if recording was requested and start it safely on UI thread
+    if (startRecordingRequested) {
+      startRecordingRequested = false;
+      runOnUiThread(() -> startRecordingSafely());
+    }
+  }
+
+  private boolean drawScene(
+      SampleRender render,
+      Frame frame,
+      Camera camera,
+      boolean updatePointCloudBuffer,
+      boolean updateLightEstimation) {
     if (frame.getTimestamp() != 0) {
-      // Suppress rendering if the camera did not produce the first frame yet. This is to avoid
-      // drawing possible leftover data from previous sessions if the texture is reused.
       backgroundRenderer.drawBackground(render);
     }
 
-    // If not tracking, don't draw 3D objects.
     if (camera.getTrackingState() == TrackingState.PAUSED) {
-      return;
+      return false;
     }
 
-    // -- Draw non-occluded virtual objects (planes, point cloud)
-
-    // Get projection matrix.
     camera.getProjectionMatrix(projectionMatrix, 0, Z_NEAR, Z_FAR);
-
-    // Get camera matrix and draw.
     camera.getViewMatrix(viewMatrix, 0);
 
-    // Visualize tracked points.
-    // Use try-with-resources to automatically release the point cloud.
-    try (PointCloud pointCloud = frame.acquirePointCloud()) {
-      if (pointCloud.getTimestamp() > lastPointCloudTimestamp) {
-        pointCloudVertexBuffer.set(pointCloud.getPoints());
-        lastPointCloudTimestamp = pointCloud.getTimestamp();
+    if (updatePointCloudBuffer) {
+      try (PointCloud pointCloud = frame.acquirePointCloud()) {
+        if (pointCloud.getTimestamp() > lastPointCloudTimestamp) {
+          pointCloudVertexBuffer.set(pointCloud.getPoints());
+          lastPointCloudTimestamp = pointCloud.getTimestamp();
+        }
       }
-      Matrix.multiplyMM(modelViewProjectionMatrix, 0, projectionMatrix, 0, viewMatrix, 0);
-      pointCloudShader.setMat4("u_ModelViewProjection", modelViewProjectionMatrix);
-      render.draw(pointCloudMesh, pointCloudShader);
     }
 
-    // Visualize planes.
+    Matrix.multiplyMM(modelViewProjectionMatrix, 0, projectionMatrix, 0, viewMatrix, 0);
+    pointCloudShader.setMat4("u_ModelViewProjection", modelViewProjectionMatrix);
+    render.draw(pointCloudMesh, pointCloudShader);
+
     planeRenderer.drawPlanes(
         render,
         session.getAllTrackables(Plane.class),
         camera.getDisplayOrientedPose(),
         projectionMatrix);
 
-    // -- Draw occluded virtual objects
+    if (updateLightEstimation) {
+      updateLightEstimation(frame.getLightEstimate(), viewMatrix);
+    }
 
-    // Update lighting parameters in the shader
-    updateLightEstimation(frame.getLightEstimate(), viewMatrix);
+    // Draw anchor markers directly to default framebuffer (works in both main and recording contexts)
+    final java.util.List<WrappedAnchor> wrappedAnchorsSnapshot;
+    synchronized (anchorLock) {
+      wrappedAnchorsSnapshot = new java.util.ArrayList<>(wrappedAnchors);
+    }
 
-    // Visualize anchors created by touch.
+    if (anchorPointMesh != null && anchorPointShader != null && anchorPointVertexBuffer != null) {
+      int maxAnchors = wrappedAnchorsSnapshot.size();
+      if (maxAnchors > 0) {
+        // Ensure buffer is large enough (4 floats per anchor: x, y, z, w)
+        int requiredFloats = maxAnchors * 4;
+        if (anchorPointFloatBuffer == null || anchorPointFloatBuffer.capacity() < requiredFloats) {
+          anchorPointFloatBuffer =
+              ByteBuffer.allocateDirect(requiredFloats * Float.BYTES)
+                  .order(java.nio.ByteOrder.nativeOrder())
+                  .asFloatBuffer();
+        }
+        
+        // Clear buffer before use
+        anchorPointFloatBuffer.clear();
+        int trackingCount = 0;
+        for (WrappedAnchor wrappedAnchor : wrappedAnchorsSnapshot) {
+          Anchor anchor = wrappedAnchor.getAnchor();
+          if (anchor.getTrackingState() != TrackingState.TRACKING) {
+            continue;
+          }
+          anchor.getPose().getTranslation(anchorPointTmpTranslation, 0);
+          anchorPointFloatBuffer.put(anchorPointTmpTranslation[0]);
+          anchorPointFloatBuffer.put(anchorPointTmpTranslation[1]);
+          anchorPointFloatBuffer.put(anchorPointTmpTranslation[2]);
+          anchorPointFloatBuffer.put(1.0f);
+          trackingCount++;
+        }
+
+        if (trackingCount > 0) {
+          anchorPointFloatBuffer.flip();
+          try {
+            anchorPointVertexBuffer.set(anchorPointFloatBuffer);
+            anchorPointShader.setMat4("u_ModelViewProjection", modelViewProjectionMatrix);
+            render.draw(anchorPointMesh, anchorPointShader);
+          } catch (Exception e) {
+            Log.w(TAG, "Failed to render anchor points", e);
+            // Continue without rendering anchor points
+          }
+        }
+      }
+    }
+
     render.clear(virtualSceneFramebuffer, 0f, 0f, 0f, 0f);
-    for (WrappedAnchor wrappedAnchor : wrappedAnchors) {
+
+    for (WrappedAnchor wrappedAnchor : wrappedAnchorsSnapshot) {
       Anchor anchor = wrappedAnchor.getAnchor();
-      Trackable trackable = wrappedAnchor.getTrackable();
       if (anchor.getTrackingState() != TrackingState.TRACKING) {
         continue;
       }
 
-      // Get the current pose of an Anchor in world space. The Anchor pose is updated
-      // during calls to session.update() as ARCore refines its estimate of the world.
       anchor.getPose().toMatrix(modelMatrix, 0);
-
-      // Calculate model/view/projection matrices
       Matrix.multiplyMM(modelViewMatrix, 0, viewMatrix, 0, modelMatrix, 0);
       Matrix.multiplyMM(modelViewProjectionMatrix, 0, projectionMatrix, 0, modelViewMatrix, 0);
-
-      // Update shader properties and draw
-      virtualObjectShader.setMat4("u_ModelView", modelViewMatrix);
-      virtualObjectShader.setMat4("u_ModelViewProjection", modelViewProjectionMatrix);
-
-      // Skip drawing the previous 3D anchor renderable; anchors are visualized via overlay emoji.
-      continue;
     }
 
-    // Compose the virtual scene with the background.
     backgroundRenderer.drawVirtualScene(render, virtualSceneFramebuffer, Z_NEAR, Z_FAR);
+    return true;
+  }
 
-    recordFrameData(frame);
-    updateMeasurementUi(viewMatrix, projectionMatrix);
+  private ParcelFileDescriptor openParcelFileDescriptor(Uri uri) {
+    if (uri == null) {
+      return null;
+    }
+    try {
+      return getContentResolver().openFileDescriptor(uri, "w");
+    } catch (FileNotFoundException e) {
+      Log.e(TAG, "Failed to open ParcelFileDescriptor", e);
+      return null;
+    }
   }
 
   private void onRecordButtonClicked() {
@@ -864,14 +1099,33 @@ public class HelloArActivity extends AppCompatActivity implements SampleRender.R
       return;
     }
     if (!isRecording) {
-      startRecordingInternal();
+      // Set flag to start recording on next frame completion
+      startRecordingRequested = true;
     } else {
       stopRecordingInternal();
     }
   }
 
-  private void startRecordingInternal() {
-    if (isRecording || session == null) {
+
+  private void showStopRecordingDialog() {
+    if (!isRecording) {
+      return;
+    }
+    
+    new androidx.appcompat.app.AlertDialog.Builder(this)
+        .setTitle("Stop Recording")
+        .setMessage("Do you want to stop recording?")
+        .setPositiveButton("Stop", (dialog, which) -> {
+          if (isRecording) {
+            stopRecordingInternal();
+          }
+        })
+        .setNegativeButton("Cancel", null)
+        .show();
+  }
+
+  private void startRecordingSafely() {
+    if (isRecording || session == null || mediaProjectionManager == null) {
       return;
     }
 
@@ -880,46 +1134,156 @@ public class HelloArActivity extends AppCompatActivity implements SampleRender.R
       return;
     }
 
-    RecordingConfig recordingConfig = new RecordingConfig(session).setAutoStopOnPause(true);
-    if (destination.getVideoFilePath() != null) {
-      recordingConfig.setMp4DatasetFilePath(destination.getVideoFilePath());
-    } else if (destination.getVideoUri() != null) {
-      recordingConfig.setMp4DatasetUri(destination.getVideoUri());
-    } else {
+    pendingRecordingDestination = destination;
+    pendingStartAfterPermission = true;
+
+    try {
+      Intent captureIntent = mediaProjectionManager.createScreenCaptureIntent();
+      screenCaptureLauncher.launch(captureIntent);
+    } catch (ActivityNotFoundException e) {
+      Log.e(TAG, "Screen capture intent unavailable", e);
       Toast.makeText(this, R.string.recording_prepare_failed, Toast.LENGTH_SHORT).show();
-      destination.deleteArtifacts(this);
+      pendingRecordingDestination.deleteArtifacts(this);
+      pendingRecordingDestination = null;
+      pendingStartAfterPermission = false;
+    }
+  }
+
+  private void startScreenRecordingWithPermissionResult(ActivityResult result) {
+    if (!pendingStartAfterPermission) {
+      return;
+    }
+    pendingStartAfterPermission = false;
+
+    if (mediaProjectionManager == null || pendingRecordingDestination == null) {
+      Log.w(TAG, "Cannot start recording: prerequisites missing");
+      return;
+    }
+
+    Intent data = result.getData();
+    if (result.getResultCode() != Activity.RESULT_OK || data == null) {
+      Log.w(TAG, "Screen capture permission denied by user");
+      pendingRecordingDestination.deleteArtifacts(this);
+      pendingRecordingDestination = null;
+      resetRecordingState();
+      updateRecordingUiState();
+      Toast.makeText(this, R.string.recording_prepare_failed, Toast.LENGTH_SHORT).show();
+      return;
+    }
+
+    ScreenRecordingForegroundService.start(this);
+
+    mediaProjection = mediaProjectionManager.getMediaProjection(result.getResultCode(), data);
+    if (mediaProjection == null) {
+      Log.e(TAG, "MediaProjection returned null");
+      pendingRecordingDestination.deleteArtifacts(this);
+      pendingRecordingDestination = null;
+      resetRecordingState();
+      updateRecordingUiState();
+      Toast.makeText(this, R.string.recording_prepare_failed, Toast.LENGTH_SHORT).show();
+      return;
+    }
+
+    DisplayMetrics metrics = new DisplayMetrics();
+    WindowManager windowManager = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
+    Display display = null;
+    if (windowManager != null) {
+      display = windowManager.getDefaultDisplay();
+      if (display != null) {
+        display.getRealMetrics(metrics);
+      } else {
+        metrics.setTo(getResources().getDisplayMetrics());
+      }
+    } else {
+      metrics.setTo(getResources().getDisplayMetrics());
+    }
+
+    int captureWidth = metrics.widthPixels;
+    int captureHeight = metrics.heightPixels;
+    if (surfaceView != null && surfaceView.getWidth() > 0 && surfaceView.getHeight() > 0) {
+      captureWidth = surfaceView.getWidth();
+      captureHeight = surfaceView.getHeight();
+    }
+
+    // Ensure even dimensions for encoder compatibility.
+    if ((captureWidth & 1) == 1) {
+      captureWidth -= 1;
+    }
+    if ((captureHeight & 1) == 1) {
+      captureHeight -= 1;
+    }
+
+    if (captureWidth <= 0 || captureHeight <= 0) {
+      Log.e(TAG, "Invalid capture dimensions" + captureWidth + "x" + captureHeight);
+      handlePreparationFailure();
+      return;
+    }
+
+    if (!prepareMediaRecorder(pendingRecordingDestination, captureWidth, captureHeight, metrics.densityDpi)) {
+      handlePreparationFailure();
       return;
     }
 
     try {
-      session.startRecording(recordingConfig);
-    } catch (RecordingFailedException e) {
-      Log.e(TAG, "Failed to start ARCore recording", e);
-      Toast.makeText(this, e.getMessage(), Toast.LENGTH_SHORT).show();
-      destination.deleteArtifacts(this);
-      return;
-    }
-
-    currentRecordingDestination = destination;
-    currentRecordingDisplayLabel = destination.getVideoDisplayName();
-    currentRecordingPath = destination.getVideoFilePath();
-    currentRecordingContentUri = destination.getVideoUri();
-    currentRecordingJsonPath = destination.getJsonFilePath();
-    currentRecordingJsonUri = destination.getJsonUri();
-    recordingFrameIndex = 0L;
-
-    try {
-      recordingDataWriter = RecordingDataWriter.start(this, destination);
+      recordingDataWriter = RecordingDataWriter.start(this, pendingRecordingDestination);
     } catch (IOException e) {
       Log.e(TAG, "Failed to create JSON writer", e);
       Toast.makeText(this, R.string.recording_prepare_failed, Toast.LENGTH_SHORT).show();
-      stopRecordingSessionSilently();
-      destination.deleteArtifacts(this);
-      resetRecordingState();
-      updateRecordingUiState();
+      handlePreparationFailure();
       return;
     }
 
+    currentRecordingDestination = pendingRecordingDestination;
+    currentRecordingDisplayLabel = pendingRecordingDestination.getVideoDisplayName();
+    currentRecordingPath = pendingRecordingDestination.getVideoFilePath();
+    currentRecordingContentUri = pendingRecordingDestination.getVideoUri();
+    currentRecordingJsonPath = pendingRecordingDestination.getJsonFilePath();
+    currentRecordingJsonUri = pendingRecordingDestination.getJsonUri();
+    recordingFrameIndex = 0L;
+    synchronized (planeLock) {
+      planeIds.clear();
+      nextPlaneId = 1;
+    }
+
+    mediaProjectionCallback =
+        new MediaProjection.Callback() {
+          @Override
+          public void onStop() {
+            runOnUiThread(() -> handleProjectionStoppedExternally());
+          }
+        };
+    mediaProjection.registerCallback(mediaProjectionCallback, new Handler(Looper.getMainLooper()));
+
+    VirtualDisplay createdDisplay =
+        mediaProjection.createVirtualDisplay(
+            SCREEN_CAPTURE_DISPLAY_NAME,
+            captureWidth,
+            captureHeight,
+            metrics.densityDpi,
+            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+            mediaRecorder.getSurface(),
+            null,
+            null);
+
+    if (createdDisplay == null) {
+      Log.e(TAG, "Failed to create virtual display");
+      Toast.makeText(this, R.string.recording_prepare_failed, Toast.LENGTH_SHORT).show();
+      handlePreparationFailure();
+      return;
+    }
+
+    virtualDisplay = createdDisplay;
+
+    try {
+      mediaRecorder.start();
+    } catch (RuntimeException e) {
+      Log.e(TAG, "Failed to start MediaRecorder", e);
+      Toast.makeText(this, R.string.recording_prepare_failed, Toast.LENGTH_SHORT).show();
+      handlePreparationFailure();
+      return;
+    }
+
+    pendingRecordingDestination = null;
     isRecording = true;
     recordingStartElapsedRealtime = SystemClock.elapsedRealtime();
     recordingDotVisible = true;
@@ -928,19 +1292,71 @@ public class HelloArActivity extends AppCompatActivity implements SampleRender.R
     Toast.makeText(this, R.string.recording_start_success, Toast.LENGTH_SHORT).show();
   }
 
-  private void stopRecordingInternal() {
-    if (!isRecording || session == null) {
-      return;
+  private void handlePreparationFailure() {
+    stopScreenRecording();
+    if (pendingRecordingDestination != null) {
+      pendingRecordingDestination.deleteArtifacts(this);
+      pendingRecordingDestination = null;
     }
+    resetRecordingState();
+    updateRecordingUiState();
+  }
 
-    boolean success = true;
+  private boolean prepareMediaRecorder(
+      RecordingDestination destination, int width, int height, int densityDpi) {
+    releaseMediaRecorder(true);
+
+    mediaRecorder = new MediaRecorder();
     try {
-      session.stopRecording();
-    } catch (RecordingFailedException e) {
-      Log.e(TAG, "Failed to stop ARCore recording", e);
-      Toast.makeText(this, e.getMessage(), Toast.LENGTH_SHORT).show();
-      success = false;
+      if (shouldRecordAudio) {
+        mediaRecorder.setAudioSource(MediaRecorder.AudioSource.MIC);
+      }
+      mediaRecorder.setVideoSource(MediaRecorder.VideoSource.SURFACE);
+      mediaRecorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4);
+      if (shouldRecordAudio) {
+        mediaRecorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC);
+        mediaRecorder.setAudioEncodingBitRate(128_000);
+        mediaRecorder.setAudioSamplingRate(44_100);
+      }
+      mediaRecorder.setVideoEncoder(MediaRecorder.VideoEncoder.H264);
+      mediaRecorder.setVideoEncodingBitRate(Math.max(width * height * 5, 4_000_000));
+      mediaRecorder.setVideoFrameRate(30);
+      mediaRecorder.setVideoSize(width, height);
+
+      WindowManager windowManager = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
+      if (windowManager != null) {
+        Display display = windowManager.getDefaultDisplay();
+        if (display != null) {
+          mediaRecorder.setOrientationHint(getRotationDegrees(display.getRotation()));
+        }
+      }
+
+      if (destination.getVideoFilePath() != null) {
+        mediaRecorder.setOutputFile(destination.getVideoFilePath());
+      } else {
+        closeRecordingParcel();
+        recordingParcelFileDescriptor = openParcelFileDescriptor(destination.getVideoUri());
+        if (recordingParcelFileDescriptor == null) {
+          throw new IOException("Failed to open recording destination");
+        }
+        mediaRecorder.setOutputFile(recordingParcelFileDescriptor.getFileDescriptor());
+      }
+
+      mediaRecorder.prepare();
+      return true;
+    } catch (IOException | RuntimeException e) {
+      Log.e(TAG, "Unable to prepare MediaRecorder", e);
+      Toast.makeText(this, R.string.recording_prepare_failed, Toast.LENGTH_SHORT).show();
+      releaseMediaRecorder(true);
+      closeRecordingParcel();
+      return false;
     }
+  }
+
+  private void handleProjectionStoppedExternally() {
+    boolean success = stopScreenRecording();
+
+    ScreenRecordingForegroundService.stop(this);
 
     if (recordingDataWriter != null) {
       recordingDataWriter.finish();
@@ -968,8 +1384,129 @@ public class HelloArActivity extends AppCompatActivity implements SampleRender.R
     }
   }
 
+  private boolean stopScreenRecording() {
+    boolean success = true;
+
+    try {
+      if (mediaRecorder != null) {
+        mediaRecorder.stop();
+      }
+    } catch (RuntimeException e) {
+      Log.e(TAG, "Failed to stop MediaRecorder", e);
+      success = false;
+    }
+
+    releaseMediaRecorder(true);
+
+    if (virtualDisplay != null) {
+      virtualDisplay.release();
+      virtualDisplay = null;
+    }
+
+    if (mediaProjectionCallback != null && mediaProjection != null) {
+      mediaProjection.unregisterCallback(mediaProjectionCallback);
+    }
+    mediaProjectionCallback = null;
+
+    if (mediaProjection != null) {
+      mediaProjection.stop();
+      mediaProjection = null;
+    }
+
+    closeRecordingParcel();
+
+    return success;
+  }
+
+  private void stopRecordingInternal() {
+    if (pendingStartAfterPermission) {
+      pendingStartAfterPermission = false;
+      if (pendingRecordingDestination != null) {
+        pendingRecordingDestination.deleteArtifacts(this);
+        pendingRecordingDestination = null;
+      }
+      updateRecordingUiState();
+      return;
+    }
+
+    if (!isRecording || session == null) {
+      return;
+    }
+
+    boolean success = stopScreenRecording();
+
+    if (recordingDataWriter != null) {
+      recordingDataWriter.finish();
+      recordingDataWriter = null;
+    }
+
+    String displayName = currentRecordingDisplayLabel;
+    if (!success && currentRecordingDestination != null) {
+      currentRecordingDestination.deleteArtifacts(this);
+    }
+
+    resetRecordingState();
+    updateRecordingUiState();
+
+    if (success) {
+      if (!TextUtils.isEmpty(displayName)) {
+        Toast.makeText(
+                this, getString(R.string.recording_stop_success, displayName), Toast.LENGTH_LONG)
+            .show();
+      } else {
+        Toast.makeText(this, R.string.recording_stop_generic, Toast.LENGTH_SHORT).show();
+      }
+    } else {
+      Toast.makeText(this, R.string.recording_stopped_error, Toast.LENGTH_SHORT).show();
+    }
+  }
+
+  private void releaseMediaRecorder(boolean releaseCompletely) {
+    if (mediaRecorder == null) {
+      return;
+    }
+
+    try {
+      mediaRecorder.reset();
+    } catch (RuntimeException e) {
+      Log.w(TAG, "Failed to reset MediaRecorder", e);
+    }
+
+    if (releaseCompletely) {
+      mediaRecorder.release();
+      mediaRecorder = null;
+    }
+  }
+
+  private void closeRecordingParcel() {
+    if (recordingParcelFileDescriptor != null) {
+      try {
+        recordingParcelFileDescriptor.close();
+      } catch (IOException e) {
+        Log.w(TAG, "Failed to close ParcelFileDescriptor", e);
+      }
+      recordingParcelFileDescriptor = null;
+    }
+  }
+
+  private int getRotationDegrees(int rotation) {
+    switch (rotation) {
+      case Surface.ROTATION_90:
+        return 0;
+      case Surface.ROTATION_180:
+        return 270;
+      case Surface.ROTATION_270:
+        return 180;
+      case Surface.ROTATION_0:
+      default:
+        return 90;
+    }
+  }
+
   private void updateRecordingUiState() {
     if (recordButton != null) {
+      // Hide button during recording so it doesn't appear in screen recordings
+      recordButton.setVisibility(isRecording ? View.INVISIBLE : View.VISIBLE);
       recordButton.setBackgroundResource(
           isRecording ? R.drawable.record_button_recording : R.drawable.record_button_idle);
       recordButton.setContentDescription(
@@ -978,6 +1515,19 @@ public class HelloArActivity extends AppCompatActivity implements SampleRender.R
     }
     if (recordingStatusContainer != null) {
       recordingStatusContainer.setVisibility(isRecording ? View.VISIBLE : View.GONE);
+      // Add touch listener to stop recording when button is hidden
+      if (isRecording) {
+        recordingStatusContainer.setOnTouchListener((v, event) -> {
+          if (event.getAction() == MotionEvent.ACTION_DOWN) {
+            // Show confirmation dialog to stop recording
+            showStopRecordingDialog();
+            return true;
+          }
+          return false;
+        });
+      } else {
+        recordingStatusContainer.setOnTouchListener(null);
+      }
     }
     if (!isRecording && recordingTimerText != null) {
       recordingTimerText.setText(getString(R.string.recording_timer_default));
@@ -989,12 +1539,20 @@ public class HelloArActivity extends AppCompatActivity implements SampleRender.R
   }
 
   private void showRecordingOutputDialog() {
+    View contentView =
+        getLayoutInflater().inflate(R.layout.dialog_recording_settings, null, false);
+    SwitchCompat audioSwitch = contentView.findViewById(R.id.recording_audio_switch);
+    audioSwitch.setChecked(shouldRecordAudio);
+    audioSwitch.setOnCheckedChangeListener(
+        (buttonView, isChecked) -> updateAudioPreference(isChecked));
+
     String[] options = {
       getString(R.string.recording_pick_folder_option),
       getString(R.string.recording_use_app_folder_option)
     };
     new AlertDialog.Builder(this)
         .setTitle(R.string.recording_output_settings_title)
+        .setView(contentView)
         .setItems(
             options,
             (dialog, which) -> {
@@ -1017,7 +1575,13 @@ public class HelloArActivity extends AppCompatActivity implements SampleRender.R
                 }
               }
             })
+        .setPositiveButton(android.R.string.ok, null)
         .show();
+  }
+
+  private void updateAudioPreference(boolean enableAudio) {
+    shouldRecordAudio = enableAudio;
+    sharedPreferences.edit().putBoolean(PREF_RECORDING_AUDIO_ENABLED, enableAudio).apply();
   }
 
   private RecordingDestination createRecordingDestination() {
@@ -1123,17 +1687,68 @@ public class HelloArActivity extends AppCompatActivity implements SampleRender.R
       }
     }
 
-    recordingDataWriter.appendFrame(frameIndex, timestampNs, anchorData);
+    Map<Integer, PlaneFrameData> planeData = new LinkedHashMap<>();
+    if (session != null) {
+      Collection<Plane> allPlanes = session.getAllTrackables(Plane.class);
+      synchronized (planeLock) {
+        Iterator<Map.Entry<Plane, Integer>> iterator = planeIds.entrySet().iterator();
+        while (iterator.hasNext()) {
+          Map.Entry<Plane, Integer> entry = iterator.next();
+          Plane plane = entry.getKey();
+          if (plane.getTrackingState() == TrackingState.STOPPED || plane.getSubsumedBy() != null) {
+            iterator.remove();
+          }
+        }
+        for (Plane plane : allPlanes) {
+          if (plane.getTrackingState() != TrackingState.TRACKING || plane.getSubsumedBy() != null) {
+            continue;
+          }
+          int planeId = planeIds.computeIfAbsent(plane, unused -> nextPlaneId++);
+          planeData.put(planeId, PlaneFrameData.fromPlane(plane));
+        }
+      }
+    }
+
+    recordingDataWriter.appendFrame(frameIndex, timestampNs, anchorData, planeData);
   }
 
-  private void stopRecordingSessionSilently() {
-    if (session == null) {
-      return;
+  private static final class PlaneFrameData {
+    final float[] centerPose;
+    final float[] extent;
+    final float[] polygon;
+    final Plane.Type type;
+
+    private PlaneFrameData(float[] centerPose, float[] extent, float[] polygon, Plane.Type type) {
+      this.centerPose = centerPose;
+      this.extent = extent;
+      this.polygon = polygon;
+      this.type = type;
     }
-    try {
-      session.stopRecording();
-    } catch (RecordingFailedException e) {
-      Log.w(TAG, "Failed to stop recording during cleanup", e);
+
+    static PlaneFrameData fromPlane(Plane plane) {
+      float[] poseTranslation = new float[3];
+      float[] poseRotation = new float[4];
+      plane.getCenterPose().getTranslation(poseTranslation, 0);
+      plane.getCenterPose().getRotationQuaternion(poseRotation, 0);
+      float[] centerPose =
+          new float[] {
+            poseTranslation[0],
+            poseTranslation[1],
+            poseTranslation[2],
+            poseRotation[0],
+            poseRotation[1],
+            poseRotation[2],
+            poseRotation[3]
+          };
+
+      float[] extent = new float[] {plane.getExtentX(), plane.getExtentZ()};
+      FloatBuffer polygonBuffer = plane.getPolygon();
+      FloatBuffer duplicated = polygonBuffer.duplicate();
+      duplicated.rewind();
+      float[] polygon = new float[duplicated.remaining()];
+      duplicated.get(polygon);
+
+      return new PlaneFrameData(centerPose, extent, polygon, plane.getType());
     }
   }
 
@@ -1179,6 +1794,10 @@ public class HelloArActivity extends AppCompatActivity implements SampleRender.R
     recordingStartElapsedRealtime = 0L;
     recordingDotVisible = true;
     recordingFrameIndex = 0L;
+    synchronized (planeLock) {
+      planeIds.clear();
+      nextPlaneId = 1;
+    }
   }
 
   private boolean hasStoredTreeUri() {
@@ -1355,15 +1974,21 @@ public class HelloArActivity extends AppCompatActivity implements SampleRender.R
       jsonWriter.flush();
     }
 
-    void appendFrame(long frameIndex, long timestampNs, Map<Integer, float[]> anchors) {
+    void appendFrame(
+        long frameIndex,
+        long timestampNs,
+        Map<Integer, float[]> anchors,
+        Map<Integer, PlaneFrameData> planes) {
       if (closed) {
         return;
       }
+      Map<Integer, float[]> anchorSnapshot = new LinkedHashMap<>(anchors);
+      Map<Integer, PlaneFrameData> planeSnapshot = new LinkedHashMap<>(planes);
       try {
         executor.submit(
             () -> {
               try {
-                if (anchors.isEmpty()) {
+                if (anchorSnapshot.isEmpty() && planeSnapshot.isEmpty()) {
                   return;
                 }
                 jsonWriter.name(Long.toString(frameIndex));
@@ -1371,13 +1996,41 @@ public class HelloArActivity extends AppCompatActivity implements SampleRender.R
                 jsonWriter.name("timestamp_ns").value(timestampNs);
                 jsonWriter.name("anchors");
                 jsonWriter.beginObject();
-                for (Map.Entry<Integer, float[]> entry : anchors.entrySet()) {
+                for (Map.Entry<Integer, float[]> entry : anchorSnapshot.entrySet()) {
                   jsonWriter.name("anchor_" + entry.getKey());
                   float[] values = entry.getValue();
                   jsonWriter.beginObject();
                   jsonWriter.name("x").value(values[0]);
                   jsonWriter.name("y").value(values[1]);
                   jsonWriter.name("z").value(values[2]);
+                  jsonWriter.endObject();
+                }
+                jsonWriter.endObject();
+                jsonWriter.name("planes");
+                jsonWriter.beginObject();
+                for (Map.Entry<Integer, PlaneFrameData> entry : planeSnapshot.entrySet()) {
+                  PlaneFrameData data = entry.getValue();
+                  jsonWriter.name("plane_" + entry.getKey());
+                  jsonWriter.beginObject();
+                  jsonWriter.name("type").value(data.type.name());
+                  jsonWriter.name("center_pose");
+                  jsonWriter.beginArray();
+                  for (float value : data.centerPose) {
+                    jsonWriter.value(value);
+                  }
+                  jsonWriter.endArray();
+                  jsonWriter.name("extent");
+                  jsonWriter.beginArray();
+                  for (float value : data.extent) {
+                    jsonWriter.value(value);
+                  }
+                  jsonWriter.endArray();
+                  jsonWriter.name("polygon");
+                  jsonWriter.beginArray();
+                  for (float value : data.polygon) {
+                    jsonWriter.value(value);
+                  }
+                  jsonWriter.endArray();
                   jsonWriter.endObject();
                 }
                 jsonWriter.endObject();
@@ -1449,7 +2102,11 @@ public class HelloArActivity extends AppCompatActivity implements SampleRender.R
             || (trackable instanceof DepthPoint)) {
           // Cap the number of objects created. This avoids overloading both the
           // rendering system and ARCore.
-          if (wrappedAnchors.size() >= 20) {
+          final int wrappedAnchorsCount;
+          synchronized (anchorLock) {
+            wrappedAnchorsCount = wrappedAnchors.size();
+          }
+          if (wrappedAnchorsCount >= 20) {
             WrappedAnchor toRemove;
             synchronized (anchorLock) {
               if (wrappedAnchors.isEmpty()) {
