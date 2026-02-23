@@ -124,7 +124,6 @@ public class MeasurementOverlayView extends View {
   public interface OnAnchorDeleteListener {
     void onAnchorDelete(int anchorId);
   }
-
   public interface OnPassthroughTouchListener {
     void onUnhandledTouch(MotionEvent event);
   }

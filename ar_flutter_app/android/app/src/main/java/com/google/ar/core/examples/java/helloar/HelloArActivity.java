@@ -317,6 +317,9 @@ public class HelloArActivity extends AppCompatActivity implements SampleRender.R
     shouldRecordAudio = sharedPreferences.getBoolean(PREF_RECORDING_AUDIO_ENABLED, false);
     mediaProjectionManager =
         (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
+
+    // Start the foreground service early to satisfy MediaProjection requirements
+    ScreenRecordingForegroundService.start(this);
     screenCaptureLauncher =
         registerForActivityResult(
             new StartActivityForResult(),
@@ -1170,8 +1173,6 @@ public class HelloArActivity extends AppCompatActivity implements SampleRender.R
       Toast.makeText(this, R.string.recording_prepare_failed, Toast.LENGTH_SHORT).show();
       return;
     }
-
-    ScreenRecordingForegroundService.start(this);
 
     mediaProjection = mediaProjectionManager.getMediaProjection(result.getResultCode(), data);
     if (mediaProjection == null) {
